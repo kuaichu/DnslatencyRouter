@@ -1,0 +1,31 @@
+# Cloudflare configuration
+cloudflare:
+  api_token: "cfut_2rtWlkYXipPsNg7gFmVv4gLsRGpbVA21R7G5IBZl829cd996"           # Your Cloudflare API Token (Zone:DNS:Edit permission)
+  zone_id: "064c2397c4b9c353ee78a10892b2d6cf"             # Cloudflare Zone ID
+  record_id: "ed878cfb7eec9ca4cf57e5f3ba631684"           # RD_ID - DNS Record ID of CUSTOM_DOMAIN's A record
+
+# The domain whose IPs we probe (e.g. api.openai.com, api.deepseek.com)
+target_domain: "2310.hk.0x2.1211.dyc.nod3.org"
+
+# Your custom domain that points to the fastest IP (used in proxy client)
+custom_domain: "sntp-entry.yeque.top"
+
+# Check interval in seconds (default: 300 = 5 minutes)
+check_interval: 300
+
+# TCP ping settings
+ping_port: 22101
+ping_timeout_seconds: 5
+ping_min_threshold_ms: 1      # Skip results below this latency (e.g. 0.xx ms = local proxy, not real)
+
+# Web dashboard port (0 = disabled)
+web_port: 19198
+
+# Multi-carrier DNS servers to discover all possible IPs
+# 114DNS=电信, Alidns=阿里云, DNSPod=腾讯, BaiduDNS=百度
+dns_servers:
+  - 114.114.114.114
+  - 223.5.5.5
+  - 119.29.29.29
+  - 180.76.76.76
+  - 8.8.8.8

@@ -1,0 +1,11 @@
+# Binaries
+dns-latency-router.exe
+dns-latency-router
+
+# Logs
+logs/
+
+# IDE
+.vscode/
+.idea/
+.claude/
