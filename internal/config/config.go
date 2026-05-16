@@ -19,10 +19,19 @@ type Config struct {
 	Cloudflare         CloudflareConfig `yaml:"cloudflare"`
 	TargetDomain       string           `yaml:"target_domain"`
 	CustomDomain       string           `yaml:"custom_domain"`
+	ProbeSource        string           `yaml:"probe_source"`
 	CheckIntervalSec   int              `yaml:"check_interval"`
+	ProxyURL           string           `yaml:"proxy_url"` // SOCKS5/HTTP proxy for Cloudflare API
+	PingMode           string           `yaml:"ping_mode"` // "icmp" or "tcp"
 	PingPort           int              `yaml:"ping_port"`
 	PingTimeoutSec     int              `yaml:"ping_timeout_seconds"`
+	PingAttempts       int              `yaml:"ping_attempts"`
 	PingMinThresholdMs float64          `yaml:"ping_min_threshold_ms"`
+	LatencyWeight      float64          `yaml:"selection_latency_weight"`
+	JitterWeight       float64          `yaml:"selection_jitter_weight"`
+	LossWeight         float64          `yaml:"selection_loss_weight"`
+	SwitchImprovement  float64          `yaml:"switch_improvement_percent"`
+	SwitchStableSec    int              `yaml:"switch_stable_seconds"`
 	DNSServers         []string         `yaml:"dns_servers"`
 	WebPort            int              `yaml:"web_port"`
 
@@ -40,9 +49,17 @@ func Load(path string) (*Config, error) {
 
 	cfg := &Config{
 		CheckIntervalSec:   300,
+		ProbeSource:        "宁波联通",
+		PingMode:           "icmp",
 		PingPort:           443,
 		PingTimeoutSec:     5,
+		PingAttempts:       4,
 		PingMinThresholdMs: 1,
+		LatencyWeight:      1.0,
+		JitterWeight:       0.35,
+		LossWeight:         4.0,
+		SwitchImprovement:  15,
+		SwitchStableSec:    120,
 		WebPort:            0, // 0 = disabled
 		DNSServers: []string{
 			"114.114.114.114", // China Telecom
@@ -70,6 +87,12 @@ func Load(path string) (*Config, error) {
 	if cfg.TargetDomain == "" {
 		return nil, fmt.Errorf("target_domain is required")
 	}
+	if cfg.PingAttempts < 1 {
+		cfg.PingAttempts = 1
+	}
+	if cfg.SwitchStableSec < 0 {
+		cfg.SwitchStableSec = 0
+	}
 
 	cfg.PingTimeout = time.Duration(cfg.PingTimeoutSec) * time.Second
 	cfg.CheckInterval = time.Duration(cfg.CheckIntervalSec) * time.Second
@@ -80,7 +103,8 @@ func Load(path string) (*Config, error) {
 
 // UpdateYAMLField updates a specific field in the YAML config file,
 // preserving comments and formatting (line-based replacement).
-func UpdateYAMLField(path, key, value string) error {
+// If quoted is true, the value is wrapped in double quotes (for string fields).
+func UpdateYAMLField(path, key, value string, quoted bool) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read config for update: %w", err)
@@ -93,7 +117,11 @@ func UpdateYAMLField(path, key, value string) error {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, prefix) {
 			indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-			lines[i] = indent + key + ": \"" + value + "\""
+			if quoted {
+				lines[i] = indent + key + ": \"" + value + "\""
+			} else {
+				lines[i] = indent + key + ": " + value
+			}
 			replaced = true
 			break
 		}

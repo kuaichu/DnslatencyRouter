@@ -2,233 +2,183 @@
 
 ## Project Overview
 
-A Go tool that periodically resolves a target domain from multiple DNS servers (one per Chinese ISP), TCP-pings every discovered IP, and updates a Cloudflare DNS A record to point to the fastest one. Includes a web dashboard with real-time status, latency chart, and live config editing.
+A Go service that resolves a target domain from multiple DNS servers, probes every discovered IP, scores them by latency/jitter/loss, and updates a Cloudflare DNS A record only when a candidate is meaningfully better and stable long enough. It includes a self-contained Web dashboard for status, history, logs, IP analytics, and live config editing.
 
-**Executable**: `dns-latency-router` (Linux) / `dns-latency-router.exe` (Windows)
-**Language**: Go 1.21
-**Dependencies**: `gopkg.in/yaml.v3` (only external dep)
-
----
+**Executable**: `dns-latency-router` / `dns-latency-router.exe`  
+**Language**: Go 1.21  
+**External dependency**: `gopkg.in/yaml.v3`
 
 ## Directory Structure
 
-```
+```text
 dns-latency-router/
-├── main.go                           # Entry point, loop logic
-├── config.yaml                       # User configuration
-├── go.mod                            # Go module file
-├── README.md                         # Human-readable docs
-├── AGENTS.md                         # AI context (this file)
-├── ecosystem.config.js               # PM2 process manager config (Linux)
-├── build.sh                          # Cross-platform build script
-├── .gitignore
-├── dns-latency-router.exe            # Compiled Windows binary
-├── dns-latency-router                # Compiled Linux binary (git-ignored)
-├── logs/                             # PM2 log output (git-ignored)
-└── internal/
-    ├── config/config.go              # Config parsing, validation, YAML field update
-    ├── checker/checker.go            # Multi-DNS resolution + TCP ping
-    ├── cloudflare/cloudflare.go      # Cloudflare API client (GET/PATCH DNS records)
-    └── web/
-        ├── server.go                 # HTTP server, SSE, config API, embed template
-        └── dashboard.html            # Web UI template (embedded via go:embed)
+├── main.go
+├── config.yaml
+├── go.mod
+├── README.md
+├── AGENTS.md
+├── ecosystem.config.js
+├── build.sh
+├── internal/
+│   ├── checker/
+│   │   └── checker.go
+│   ├── cloudflare/
+│   │   └── cloudflare.go
+│   ├── config/
+│   │   └── config.go
+│   └── web/
+│       ├── dashboard_v2.html
+│       ├── persistence.go
+│       └── server.go
+└── data/
+    ├── runtime-history.json
+    ├── runtime-logs.jsonl
+    └── runtime-samples.json
 ```
 
----
-
-## Code Architecture
-
-### Entry Point (`main.go`)
+## Runtime Flow
 
 `main()`:
-1. Loads config via `config.Load()` — validates required fields on startup
-2. If `cfg.WebPort > 0`: starts web server, redirects log output to SSE broadcaster
-3. Creates Cloudflare client, verifies API access with `GetRecord()`
-4. Runs `runOnce()` immediately, then on `cfg.CheckInterval` ticker
-5. After each cycle: updates web status + appends history record
-6. Traps `os.Interrupt` for graceful shutdown
 
-`runOnce(cfg, cf, ws)` — returns `*checker.Result` or nil on failure:
-1. **Resolve**: calls `checker.ResolveFromAllDNS()` using multi-DNS → deduplicated IP list
-2. **Ping**: calls `checker.PingAll()` concurrent TCP ping on `cfg.PingPort` with `cfg.PingTimeout`
-3. **Select**: picks the first `Result` with no error (sorted by latency, fastest first)
-4. **Update**: calls `cf.UpdateRecord(best.IP)` — skips API call if IP unchanged
-5. Returns best result (nil if all failed); caller logs errors and continues loop
+1. Load config and apply defaults
+2. Start the web server if `web_port > 0`
+3. Build Cloudflare client with optional proxy
+4. Run one check immediately
+5. Continue on `check_interval` ticker or manual web trigger
+6. Persist status/history/samples/logs through `internal/web`
 
-Web config callback (closure over `cfg` pointer):
-- When user saves via `/api/config`, callback updates `cfgPtr.TargetDomain` and `cfgPtr.CustomDomain`
-- Changes take effect on next `runOnce` cycle (no restart needed)
+`runOnce()`:
 
-### Web Server (`internal/web/server.go`)
+1. Resolve all candidate IPs from configured DNS servers
+2. Mark current active IP set in web state
+3. Probe each IP using ICMP or TCP, multiple attempts per IP
+4. Compute latency/jitter/loss/score
+5. Select the best candidate above `ping_min_threshold_ms`
+6. Compare with current Cloudflare record using hysteresis
+7. Update Cloudflare only if improvement and stability conditions are met
 
-**`New(port int, cfgPath string, onConfig func(targetDomain, customDomain string)) *Server`**
-- Creates server with config path (for persistence) and callback (for runtime update)
-
-**Embedded HTML**: Uses `//go:embed dashboard.html` to bundle the entire frontend (inline CSS/JS, no external deps)
-
-**SSE** (`/api/events`): 
-- `status` event — full Status struct JSON (sent on connect + on every update)
-- `history` event — CheckRecord array (sent on connect + on new record)
-- `log` event — raw log line string
-- Keepalive ping every 30s
-
-**API endpoints**:
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Dashboard HTML |
-| GET | `/api/status` | Current status JSON |
-| GET | `/api/history` | Check history JSON |
-| GET | `/api/config` | Current domain config |
-| POST | `/api/config` | Update target/custom domain |
-| GET | `/api/events` | SSE stream |
-
-**Config update flow** (`handleAPIConfig`):
-1. Parse JSON body `{target_domain?, custom_domain?}`
-2. Call `config.UpdateYAMLField()` for each changed field (line-based replacement preserves YAML comments)
-3. Call `onConfig` callback to update in-memory config
-4. Update web status + broadcast via SSE
-5. Log the change
-
-**`UpdateYAMLField(path, key, value)`** (in config.go):
-- Reads config.yaml as lines
-- Finds line matching `key:` prefix
-- Replaces with `key: "value"` (preserving indentation)
-- Writes back to file
-
-### Config (`internal/config/config.go`)
-
-```go
-type Config struct {
-    Cloudflare       CloudflareConfig  // api_token, zone_id, record_id
-    TargetDomain     string
-    CustomDomain     string
-    CheckIntervalSec int               // default: 300
-    PingPort         int               // default: 443
-    PingTimeoutSec   int               // default: 5
-    DNSServers       []string          // default: [114.114.114.114, 223.5.5.5, ...]
-    WebPort          int               // default: 0 (disabled)
-
-    PingTimeout   time.Duration        // derived: PingTimeoutSec * Second
-    CheckInterval time.Duration        // derived: CheckIntervalSec * Second
-}
-```
-
-Validation rules:
-- `cloudflare.api_token`, `zone_id`, `record_id` — all required (fail fast)
-- `target_domain` — required
-- `custom_domain` — NOT validated (can be empty)
-- YAML defaults applied before Unmarshal, so config fields are optional
-
-### Checker (`internal/checker/checker.go`)
-
-**`ResolveFromAllDNS(domain string, dnsServers []string) ([]string, error)`**
-- Goroutine per DNS server, 5s timeout, custom dial to `dnsServer:53`
-- Deduplicates across all servers, returns unique IPs
-- Error only if ALL servers fail
-
-**`PingAll(ips []string, port int, timeout time.Duration) []Result`**
-- Goroutine per IP, TCP `net.DialTimeout`, closes immediately
-- Sorted: successful first (ascending latency), failed last (sorted by IP)
-- `Result`: `IP string`, `Latency time.Duration`, `Err error`
-
-### Cloudflare Client (`internal/cloudflare/cloudflare.go`)
-
-- Base URL: `https://api.cloudflare.com/client/v4`
-- **`GetRecord()`** — GET current record state (Type, Name, Content, TTL, Proxied)
-- **`UpdateRecord(ip)`** — PATCH with preserved Type/Name/TTL/Proxied, skip if Content unchanged
-- Error format: `[code] message` (10000 = Auth error, usually missing DNS:Edit permission)
-
-### Web UI (`internal/web/dashboard.html`)
-
-Self-contained HTML with inline CSS + JS (zero external dependencies):
-
-- **Dark theme** (GitHub-dark inspired)
-- **4 status cards**: target domain, current IP, latency (color-coded), countdown timer
-- **Latency chart**: Canvas-based, Catmull-Rom to cubic bezier smooth curves, gradient fill, time X-axis
-- **Hover tooltip**: mousemove hit detection, shows time + latency + IP in bordered box with dashed guide line
-- **Settings modal**: gear button in header, edit target/custom domain, POST /api/config, toast notification
-- **Real-time log**: SSE stream, color-coded tags `[check]/[ping]/[update]/[error]`, auto-scroll
-- **Responsive**: 4-column → 2-column → 1-column grid
-
----
-
-## Configuration File (`config.yaml`)
+## Important Config Fields
 
 ```yaml
-cloudflare:
-  api_token: ""
-  zone_id: ""
-  record_id: ""
-
-target_domain: ""
-custom_domain: ""
-
-check_interval: 300
-ping_port: 443
-ping_timeout_seconds: 5
-web_port: 19198
-
+target_domain:
+custom_domain:
+probe_source:
+proxy_url:
+ping_mode:
+ping_port:
+ping_timeout_seconds:
+ping_attempts:
+ping_min_threshold_ms:
+selection_latency_weight:
+selection_jitter_weight:
+selection_loss_weight:
+switch_improvement_percent:
+switch_stable_seconds:
+check_interval:
+web_port:
 dns_servers:
-  - 114.114.114.114
-  - 223.5.5.5
-  - 119.29.29.29
-  - 180.76.76.76
-  - 8.8.8.8
 ```
 
-Config path overridable via CLI arg: `./dns-latency-router myconfig.yaml`.
+## Current Web UI
 
----
+The dashboard is embedded from `internal/web/dashboard_v2.html`. There is no separate frontend build step.
 
-## Behavior & Edge Cases
+Main modules:
 
-| Scenario | Behavior |
-|----------|----------|
-| Target domain has 1 IP | Resolves, pings, updates (or skips if same IP) |
-| Target domain has N IPs | Discovers all via multi-DNS, pings all concurrently, picks fastest |
-| All DNS servers fail | Error logged, skipped cycle, ticker continues |
-| All pings fail | Nil result, skipped cycle, ticker continues |
-| Cloudflare API fails | Error logged, ticker continues |
-| IP unchanged | `UpdateRecord` skips PATCH (compares Content) |
-| Config missing required fields | `log.Fatalf` — immediate exit |
-| Invalid YAML | Parse error — `log.Fatalf` |
-| Config changed via web UI | Written to config.yaml + in-memory update, next cycle picks up changes |
-| Web dashboard disabled | Set `web_port: 0`, no HTTP server started |
-| SIGINT/Ctrl+C | Clean exit via signal handler |
+- Hero card with domain, live latency orb, probe source, current IP, next check, discovered count
+- IP-specific latency history chart
+- IP performance cards with:
+  - geo/ISP badge
+  - sample count
+  - latency/jitter/loss/success-rate/score
+  - orphaned state for IPs removed from the latest DNS result
+- Real-time logs with:
+  - polling frontend
+  - filter tags
+  - cycle grouping
+  - summaries
+  - collapse/expand
+  - auto-follow toggle
+- Settings modal with 3 tabs:
+  - basic
+  - probe
+  - routing
 
----
+## Persistence
 
-## Cloudflare API Notes
+Handled in `internal/web/persistence.go`.
 
-- PATCH endpoint preserves unmodified fields
-- Rate limit: 1200 requests/5min on free plan (~2/cycle = ~24/hour, well within limits)
+- Logs, history, and samples are retained for a 7-day sliding window
+- Each dataset also has a hard cap of 2000 entries
+- Data is stored under `data/`
+- Old IP analytics naturally age out through sample retention
 
----
+## Geo / IP Analytics
 
-## Build & Run
+Implemented in `internal/web/server.go` and `persistence.go`.
 
-```bash
-# One-shot both platforms
-chmod +x build.sh && ./build.sh
+- Geo lookups are cached in memory
+- Only unseen public IPs trigger geo lookup
+- Current endpoint:
+  - `http://ip-api.com/json/{ip}?lang=zh-CN&fields=status,country,city,isp`
+- `computeIPStats()` enriches each IP with:
+  - `geo`
+  - `active`
+  - `status`
+  - sample counts
+  - success rate
+  - latency/jitter/loss/score metrics
 
-# Windows
-go build -o dns-latency-router.exe .
-.\dns-latency-router.exe
+## Lifecycle / Orphaned IP Behavior
 
-# Linux + PM2
-./build.sh
-mkdir -p logs && pm2 start ecosystem.config.js
-pm2 save
-```
+- Latest DNS result becomes the active IP set
+- Historical IPs not in the latest DNS result become `status: "orphaned"`
+- Orphaned IPs are visually demoted in the UI and sorted below active IPs
+- They are not actively re-probed because new probe rounds only target the latest resolved IPs
+- Their historical samples remain visible until they age out of the 7-day window
 
-PM2: auto-restart on crash (10 retries, 5s delay), logs in `./logs/`, no watch mode.
+## Config Editing
 
----
+`/api/config` supports live updates for:
 
-## Common Issues
+- `target_domain`
+- `custom_domain`
+- `probe_source`
+- `ping_mode`
+- `ping_port`
+- `check_interval`
+- `ping_attempts`
+- `selection_latency_weight`
+- `selection_jitter_weight`
+- `selection_loss_weight`
+- `switch_improvement_percent`
+- `switch_stable_seconds`
 
-1. **Token works for GET but fails for PATCH** ([10000]): Token has DNS:Read not DNS:Edit
-2. **All DNS servers fail**: UDP 53 blocked or DNS hijacking
-3. **Web UI not reachable**: Check server firewall + cloud security group for `web_port`
-4. **Config changes not persisting**: Ensure write permission for config.yaml directory
-5. **PM2 shows 0b memory**: Binary likely missing execute permission (`chmod +x`)
+Changes are:
+
+1. Written back to `config.yaml`
+2. Applied to in-memory runtime state
+3. Reflected in the dashboard immediately
+
+## Deployment Notes
+
+Common real deployment target used in this project history:
+
+- Host: `10.0.0.231`
+- Path: `/opt/dns-latency-router`
+- Process manager: `pm2`
+- Process name: `dns-latency-router`
+
+Typical deployment flow:
+
+1. `go test ./...`
+2. Build Linux binary
+3. Upload binary to server
+4. Replace executable in `/opt/dns-latency-router`
+5. `pm2 restart dns-latency-router`
+
+## Common Pitfalls
+
+- This project no longer uses `dashboard.html`; the live template is `dashboard_v2.html`
+- The frontend currently polls JSON APIs; browser "always loading" issues from SSE are no longer the main UI path
+- Not every change needs Cloudflare API verification, but anything touching modern network behavior or deployment should be verified carefully

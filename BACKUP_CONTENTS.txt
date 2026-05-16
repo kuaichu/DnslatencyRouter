@@ -1,0 +1,16 @@
+Included:
+- Source code
+- config.yaml
+- build and PM2 files
+- README.md
+- AGENTS.md / CLAUDE.md
+- restore-windows.ps1
+- restore-linux.sh
+- RESTORE_AND_HANDOFF.md
+
+Excluded:
+- .git/
+- .claude/
+- dns-latency-router
+- dns-latency-router.exe
+- logs/

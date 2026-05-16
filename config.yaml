@@ -9,14 +9,23 @@ target_domain: "2310.hk.0x2.1211.dyc.nod3.org"
 
 # Your custom domain that points to the fastest IP (used in proxy client)
 custom_domain: "sntp-entry.yeque.top"
+probe_source: "宁波联通"
 
 # Check interval in seconds (default: 300 = 5 minutes)
 check_interval: 300
+proxy_url: "http://10.0.0.200:7893"
 
-# TCP ping settings
+# Probe and scoring settings
+ping_mode: "icmp"              # icmp or tcp
 ping_port: 22101
 ping_timeout_seconds: 5
+ping_attempts: 4               # Probe each IP multiple times to measure jitter/loss
 ping_min_threshold_ms: 1      # Skip results below this latency (e.g. 0.xx ms = local proxy, not real)
+selection_latency_weight: 1.0  # Lower is better
+selection_jitter_weight: 0.35  # Penalize unstable RTT
+selection_loss_weight: 4.0     # Penalize packet loss (percentage based)
+switch_improvement_percent: 15 # Only switch when the new IP is at least 15% better
+switch_stable_seconds: 120     # Candidate must stay best for 2 minutes before switching
 
 # Web dashboard port (0 = disabled)
 web_port: 19198

@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 const baseURL = "https://api.cloudflare.com/client/v4"
@@ -38,13 +41,33 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
-func New(apiToken, zoneID, recordID string) *Client {
+func New(apiToken, zoneID, recordID, proxyURL string) *Client {
+	transport := &http.Transport{
+		IdleConnTimeout: 30 * time.Second,
+	}
+
+	if proxyURL != "" {
+		u, err := url.Parse(proxyURL)
+		if err == nil {
+			switch u.Scheme {
+			case "socks5":
+				dialer, err := proxy.SOCKS5("tcp", u.Host, nil, proxy.Direct)
+				if err == nil {
+					transport.Dial = dialer.Dial
+				}
+			case "http", "https":
+				transport.Proxy = http.ProxyURL(u)
+			}
+		}
+	}
+
 	return &Client{
 		apiToken: apiToken,
 		zoneID:   zoneID,
 		recordID: recordID,
 		http: &http.Client{
-			Timeout: 15 * time.Second,
+			Timeout:   15 * time.Second,
+			Transport: transport,
 		},
 	}
 }
@@ -92,6 +115,15 @@ func (c *Client) GetRecord() (*dnsRecord, error) {
 		return nil, fmt.Errorf("parse record: %w", err)
 	}
 	return &rec, nil
+}
+
+// CurrentIP returns the current record content.
+func (c *Client) CurrentIP() (string, error) {
+	rec, err := c.GetRecord()
+	if err != nil {
+		return "", err
+	}
+	return rec.Content, nil
 }
 
 // UpdateRecord updates the DNS record to point to the given IP.
