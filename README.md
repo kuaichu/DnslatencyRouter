@@ -7,9 +7,11 @@
 ## 核心能力
 
 - 多 DNS 解析目标域名，尽量发现更多真实候选 IP
+- 可按运营商策略选择解析 DNS 池，`auto` 会根据探测源自动推断联通/电信/移动
 - 支持 `ICMP` / `TCP` 两种探测方式
 - 每轮可多次探测同一 IP，计算平均延迟、抖动、丢包率与综合分
 - 不是看到更低延迟就立即切换，而是带有 `阈值 + 稳定时长` 的防抖策略
+- 支持按本地时间窗口对指定 IDC / ISP 动态加权，避免深夜抖动节点误切换
 - Cloudflare API 支持走代理
 - Web 仪表盘支持在线修改主要配置并即时生效
 - 日志、检测历史、IP 样本会持久化保存最近 7 天
@@ -21,7 +23,7 @@
                          ┌──────────────────────────────┐
                          │  dns-latency-router          │
                          │                              │
-                         │  1. 多 DNS 解析目标域名       │
+                         │  1. 按运营商策略解析目标域名   │
                          │     → 收集全部候选 IP        │
                          │                              │
                          │  2. 每个 IP 多次探测          │
@@ -51,6 +53,20 @@
 
 ## 选路策略
 
+### 运营商解析策略
+
+`carrier` 控制解析阶段使用哪组 DNS 池：
+
+- `auto`: 默认值，根据 `probe_source` 里的“联通 / 电信 / 移动”自动推断
+- `unicom`: 优先使用联通视角的 DNS 池
+- `telecom`: 优先使用电信视角的 DNS 池
+- `mobile`: 优先使用移动视角的 DNS 池
+- `all`: 使用 `dns_servers` 中配置的全量解析池
+
+这个策略影响“发现哪些候选 IP”。最终是否切换，仍然由本机对这些 IP 的延迟、抖动、丢包率综合评分决定。
+
+> 注意：当前 Cloudflare 单条 A 记录只能全局指向一个 IP。这里的运营商策略是“按本探测机视角选最优 IP”，不是针对不同访客运营商分别返回不同 IP 的智能 DNS。
+
 默认不是“最低 Ping 获胜”，而是综合以下指标：
 
 - 平均延迟
@@ -71,6 +87,37 @@
 - `switch_stable_seconds`
   - 候选节点必须持续稳定一段时间，才真正调用 Cloudflare API 切换
 
+### 时间窗口权重
+
+如果你已经知道某类节点在某个时间段容易抖动，可以让系统在这段时间里自动给它“加惩罚分”。
+
+典型例子：
+
+- 白天 `Google LLC` 的 Anycast 入口很快
+- 但凌晨 `0:00 - 5:00` 容易闪烁、抖动变大
+- 这时你希望系统宁可保守选择 `Amazon 香港` 这类更稳的节点
+
+可用字段：
+
+- `time_penalty_start_hour`
+- `time_penalty_end_hour`
+- `time_penalty_score`
+- `time_penalty_org_keywords`
+
+逻辑是：
+
+- 如果当前本地时间落在指定窗口内
+- 且该 IP 的 ISP / IDC 名称命中关键词
+- 就在原有综合分上再追加一段惩罚分
+
+例如默认值：
+
+- `0 - 5` 点
+- 对 `Google LLC`
+- 追加 `60` 分
+
+这样即使某个 Google 节点瞬时 RTT 只有 `31ms`，在深夜窗口里也会被主动降权，从而更偏向真正稳定的线路。
+
 ## Web 仪表盘
 
 浏览器打开 `http://<你的服务器 IP>:19198`。
@@ -84,6 +131,7 @@
   - 下次检测倒计时
   - 本轮解析结果数量
   - 探测源说明
+  - 当前运营商解析策略
 - **延迟历史**
   - 默认显示平均延迟最低的活跃 IP
   - 可手动点击不同 IP，切换查看它自己的延迟曲线
@@ -164,6 +212,7 @@ cloudflare:
 target_domain: "api.openai.com"
 custom_domain: "your-proxy.example.com"
 probe_source: "宁波联通"
+carrier: "auto"
 
 check_interval: 300
 proxy_url: "http://127.0.0.1:7890"
@@ -178,6 +227,10 @@ selection_jitter_weight: 0.35
 selection_loss_weight: 4.0
 switch_improvement_percent: 15
 switch_stable_seconds: 120
+time_penalty_start_hour: 0
+time_penalty_end_hour: 5
+time_penalty_score: 60
+time_penalty_org_keywords: "Google LLC"
 
 web_port: 19198
 
@@ -196,6 +249,7 @@ dns_servers:
 | `target_domain` | 需要真实探测的目标域名 |
 | `custom_domain` | Cloudflare 上由本工具动态更新的 A 记录 |
 | `probe_source` | 探测机所在网络/机房说明，展示在主看板 |
+| `carrier` | 运营商解析策略：`auto` / `unicom` / `telecom` / `mobile` / `all` |
 | `check_interval` | 两轮检测之间的间隔，单位秒 |
 | `proxy_url` | Cloudflare API 请求使用的代理，可为 HTTP 或 SOCKS5 |
 | `ping_mode` | `icmp` 或 `tcp` |
@@ -208,6 +262,10 @@ dns_servers:
 | `selection_loss_weight` | 丢包权重 |
 | `switch_improvement_percent` | 新 IP 至少比当前 IP 好多少百分比才考虑切换 |
 | `switch_stable_seconds` | 候选节点需稳定多久才真正切换 |
+| `time_penalty_start_hour` | 时间窗口惩罚的开始小时，按探测机本地时间 |
+| `time_penalty_end_hour` | 时间窗口惩罚的结束小时，支持跨天 |
+| `time_penalty_score` | 命中时间窗口和目标厂商后追加的惩罚分 |
+| `time_penalty_org_keywords` | 逗号分隔的 ISP / IDC 关键词，如 `Google LLC, Google Cloud` |
 | `web_port` | Web 仪表盘端口，`0` 表示禁用 |
 
 ### 管理设置中的分组
@@ -216,6 +274,7 @@ dns_servers:
   - `target_domain`
   - `custom_domain`
   - `probe_source`
+  - `carrier`
   - `check_interval`
 - **探测配置**
   - `ping_mode`
@@ -227,6 +286,10 @@ dns_servers:
   - `selection_loss_weight`
   - `switch_improvement_percent`
   - `switch_stable_seconds`
+  - `time_penalty_start_hour`
+  - `time_penalty_end_hour`
+  - `time_penalty_score`
+  - `time_penalty_org_keywords`
 
 ## 获取 Cloudflare 参数
 

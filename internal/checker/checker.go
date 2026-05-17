@@ -19,15 +19,15 @@ var icmpSeq atomic.Uint32
 
 // Result holds the ping result for a single IP.
 type Result struct {
-	IP         string
-	Latency    time.Duration
-	Jitter     time.Duration
-	LossRate   float64
-	Attempts   int
-	Successes  int
-	Score      float64
-	LastErr    error
-	Err        error
+	IP        string
+	Latency   time.Duration
+	Jitter    time.Duration
+	LossRate  float64
+	Attempts  int
+	Successes int
+	Score     float64
+	LastErr   error
+	Err       error
 }
 
 // ResolveFromAllDNS resolves a domain from multiple DNS servers and returns unique IPs.
@@ -69,13 +69,16 @@ func ResolveFromAllDNS(domain string, dnsServers []string) ([]string, error) {
 }
 
 func resolveFromDNS(domain, dnsServer string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
+	defer cancel()
+
 	resolver := &net.Resolver{
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 			d := net.Dialer{Timeout: dnsTimeout}
 			return d.DialContext(ctx, "udp", dnsServer+":53")
 		},
 	}
-	ips, err := resolver.LookupHost(context.Background(), domain)
+	ips, err := resolver.LookupHost(ctx, domain)
 	if err != nil {
 		return nil, fmt.Errorf("dns %s: %w", dnsServer, err)
 	}
