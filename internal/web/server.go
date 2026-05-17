@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,62 +25,72 @@ var templateFS embed.FS
 
 // Status holds the current state exposed via API/SSE.
 type Status struct {
-	TargetDomain     string  `json:"targetDomain"`
-	CustomDomain     string  `json:"customDomain"`
-	ProbeSource      string  `json:"probeSource"`
-	CurrentIP        string  `json:"currentIP"`
-	Latency          float64 `json:"latency"`          // ms, 0 = unknown
-	LastCheck        string  `json:"lastCheck"`        // RFC3339
-	NextCheck        string  `json:"nextCheck"`        // RFC3339
-	IsRunning        bool    `json:"isRunning"`
-	DiscoveredCount  int     `json:"discoveredCount"`
-	CheckIntervalSec int     `json:"checkIntervalSec"`
-	PingMode         string  `json:"pingMode"`
-	PingPort         int     `json:"pingPort"`
-	PingAttempts     int     `json:"pingAttempts"`
-	LatencyWeight    float64 `json:"latencyWeight"`
-	JitterWeight     float64 `json:"jitterWeight"`
-	LossWeight       float64 `json:"lossWeight"`
+	TargetDomain      string  `json:"targetDomain"`
+	CustomDomain      string  `json:"customDomain"`
+	ProbeSource       string  `json:"probeSource"`
+	Carrier           string  `json:"carrier"`
+	CarrierLabel      string  `json:"carrierLabel"`
+	CurrentIP         string  `json:"currentIP"`
+	Latency           float64 `json:"latency"`   // ms, 0 = unknown
+	LastCheck         string  `json:"lastCheck"` // RFC3339
+	NextCheck         string  `json:"nextCheck"` // RFC3339
+	IsRunning         bool    `json:"isRunning"`
+	DiscoveredCount   int     `json:"discoveredCount"`
+	CheckIntervalSec  int     `json:"checkIntervalSec"`
+	PingMode          string  `json:"pingMode"`
+	PingPort          int     `json:"pingPort"`
+	PingAttempts      int     `json:"pingAttempts"`
+	LatencyWeight     float64 `json:"latencyWeight"`
+	JitterWeight      float64 `json:"jitterWeight"`
+	LossWeight        float64 `json:"lossWeight"`
 	SwitchImprovement float64 `json:"switchImprovement"`
-	SwitchStableSec  int     `json:"switchStableSec"`
+	SwitchStableSec   int     `json:"switchStableSec"`
 }
 
 // CheckRecord is one completed check cycle.
 type CheckRecord struct {
 	Time    time.Time `json:"time"`
 	IP      string    `json:"ip"`
-	Latency float64   `json:"latency"`          // ms, 0 if failed
+	Latency float64   `json:"latency"` // ms, 0 if failed
 	Success bool      `json:"success"`
 	Error   string    `json:"error,omitempty"`
 }
 
 // Server is the web dashboard HTTP server.
 type Server struct {
-	port       int
-	status     atomic.Value
-	history    []CheckRecord
-	historyMu  sync.Mutex
-	samples    []IPSample
-	samplesMu  sync.Mutex
-	sseClients map[string]chan sseEvent
-	sseMu      sync.Mutex
-	sseNextID  int64
-	httpServer *http.Server
-	readyCh    chan struct{}
-	cfgPath    string // for persisting config changes
-	onConfig   func(targetDomain, customDomain, probeSource, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64) // callback to notify main loop
-	triggerCh  chan<- struct{} // signal main loop to run a check immediately
-	logBuf     []LogEntry
-	logBufMu   sync.Mutex
-	logsPath   string
-	historyPath string
-	samplesPath string
-	activeIPs   map[string]bool
-	activeIPsMu sync.RWMutex
-	geoCache   map[string]GeoInfo
-	geoPending map[string]bool
-	geoMu      sync.RWMutex
-	geoClient  *http.Client
+	port                 int
+	status               atomic.Value
+	history              []CheckRecord
+	historyMu            sync.Mutex
+	samples              []IPSample
+	samplesMu            sync.Mutex
+	sseClients           map[string]chan sseEvent
+	sseMu                sync.Mutex
+	sseNextID            int64
+	httpServer           *http.Server
+	readyCh              chan struct{}
+	cfgPath              string                                                                                                                                                                                                                                                                                                                                                                               // for persisting config changes
+	onConfig             func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string) // callback to notify main loop
+	triggerCh            chan<- struct{}                                                                                                                                                                                                                                                                                                                                                                      // signal main loop to run a check immediately
+	logBuf               []LogEntry
+	logBufMu             sync.Mutex
+	logsPath             string
+	historyPath          string
+	samplesPath          string
+	activeIPs            map[string]bool
+	activeIPsMu          sync.RWMutex
+	geoCache             map[string]GeoInfo
+	geoPending           map[string]bool
+	geoMu                sync.RWMutex
+	geoClient            *http.Client
+	runtimeCfgMu         sync.RWMutex
+	failedOrphanTTLHours int
+	fallbackBaselineIP   string
+	alertWebhookURL      string
+	timePenaltyStartHour int
+	timePenaltyEndHour   int
+	timePenaltyScore     float64
+	timePenaltyKeywords  string
 }
 
 type sseEvent struct {
@@ -98,7 +109,7 @@ type GeoInfo struct {
 // New creates a web server.
 // cfgPath is the path to config.yaml for persisting changes.
 // onConfig is called when the user updates target_domain or custom_domain via the web UI.
-func New(port int, cfgPath string, triggerCh chan<- struct{}, onConfig func(targetDomain, customDomain, probeSource, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64)) *Server {
+func New(port int, cfgPath string, triggerCh chan<- struct{}, onConfig func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string)) *Server {
 	s := &Server{
 		port:       port,
 		sseClients: make(map[string]chan sseEvent),
@@ -161,6 +172,35 @@ func (s *Server) Stop() {
 	}
 }
 
+func (s *Server) SetSafeguards(ttlHours int, fallbackIP, webhookURL string) {
+	s.runtimeCfgMu.Lock()
+	s.failedOrphanTTLHours = ttlHours
+	s.fallbackBaselineIP = strings.TrimSpace(fallbackIP)
+	s.alertWebhookURL = strings.TrimSpace(webhookURL)
+	s.runtimeCfgMu.Unlock()
+}
+
+func (s *Server) SetTimePenaltyConfig(startHour, endHour int, score float64, keywords string) {
+	s.runtimeCfgMu.Lock()
+	s.timePenaltyStartHour = startHour
+	s.timePenaltyEndHour = endHour
+	s.timePenaltyScore = score
+	s.timePenaltyKeywords = strings.TrimSpace(keywords)
+	s.runtimeCfgMu.Unlock()
+}
+
+func (s *Server) safeguards() (int, string, string) {
+	s.runtimeCfgMu.RLock()
+	defer s.runtimeCfgMu.RUnlock()
+	return s.failedOrphanTTLHours, s.fallbackBaselineIP, s.alertWebhookURL
+}
+
+func (s *Server) timePenaltyConfig() (int, int, float64, string) {
+	s.runtimeCfgMu.RLock()
+	defer s.runtimeCfgMu.RUnlock()
+	return s.timePenaltyStartHour, s.timePenaltyEndHour, s.timePenaltyScore, s.timePenaltyKeywords
+}
+
 // --- Status updates (called by main loop) ---
 
 // GetStatus returns the current status copy.
@@ -205,9 +245,13 @@ func (s *Server) AddSamples(samples []IPSample) {
 	s.samplesMu.Lock()
 	s.samples = append(s.samples, samples...)
 	s.samples = pruneSamples(s.samples)
+	pruned := s.pruneFailedOrphanSamplesLocked()
 	s.samplesMu.Unlock()
 	s.persistSamples()
 	s.ensureGeoForIPs(sampleIPs(samples))
+	if pruned {
+		log.Printf("[gc] runtime sample store compacted after failed-orphan pruning")
+	}
 	s.broadcast("ipstats", mustJSON(s.computeIPStats()))
 }
 
@@ -477,10 +521,14 @@ func (s *Server) handleAPILogs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		st := s.status.Load().(*Status)
+		ttlHours, fallbackIP, webhookURL := s.safeguards()
+		timePenaltyStartHour, timePenaltyEndHour, timePenaltyScore, timePenaltyKeywords := s.timePenaltyConfig()
 		writeJSON(w, map[string]interface{}{
 			"target_domain":              st.TargetDomain,
 			"custom_domain":              st.CustomDomain,
 			"probe_source":               st.ProbeSource,
+			"carrier":                    st.Carrier,
+			"carrier_label":              st.CarrierLabel,
 			"ping_mode":                  st.PingMode,
 			"ping_port":                  st.PingPort,
 			"check_interval":             st.CheckIntervalSec,
@@ -490,6 +538,13 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			"selection_loss_weight":      st.LossWeight,
 			"switch_improvement_percent": st.SwitchImprovement,
 			"switch_stable_seconds":      st.SwitchStableSec,
+			"failed_orphan_ttl_hours":    ttlHours,
+			"fallback_baseline_ip":       fallbackIP,
+			"alert_webhook_url":          webhookURL,
+			"time_penalty_start_hour":    timePenaltyStartHour,
+			"time_penalty_end_hour":      timePenaltyEndHour,
+			"time_penalty_score":         timePenaltyScore,
+			"time_penalty_org_keywords":  timePenaltyKeywords,
 		})
 		return
 	}
@@ -500,18 +555,26 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		TargetDomain      *string  `json:"target_domain"`
-		CustomDomain      *string  `json:"custom_domain"`
-		ProbeSource       *string  `json:"probe_source"`
-		PingMode          *string  `json:"ping_mode"`
-		PingPort          *int     `json:"ping_port"`
-		CheckInterval     *int     `json:"check_interval"`
-		PingAttempts      *int     `json:"ping_attempts"`
-		LatencyWeight     *float64 `json:"selection_latency_weight"`
-		JitterWeight      *float64 `json:"selection_jitter_weight"`
-		LossWeight        *float64 `json:"selection_loss_weight"`
-		SwitchImprovement *float64 `json:"switch_improvement_percent"`
-		SwitchStableSec   *int     `json:"switch_stable_seconds"`
+		TargetDomain         *string  `json:"target_domain"`
+		CustomDomain         *string  `json:"custom_domain"`
+		ProbeSource          *string  `json:"probe_source"`
+		Carrier              *string  `json:"carrier"`
+		PingMode             *string  `json:"ping_mode"`
+		PingPort             *int     `json:"ping_port"`
+		CheckInterval        *int     `json:"check_interval"`
+		PingAttempts         *int     `json:"ping_attempts"`
+		LatencyWeight        *float64 `json:"selection_latency_weight"`
+		JitterWeight         *float64 `json:"selection_jitter_weight"`
+		LossWeight           *float64 `json:"selection_loss_weight"`
+		SwitchImprovement    *float64 `json:"switch_improvement_percent"`
+		SwitchStableSec      *int     `json:"switch_stable_seconds"`
+		FailedOrphanTTLHours *int     `json:"failed_orphan_ttl_hours"`
+		FallbackBaselineIP   *string  `json:"fallback_baseline_ip"`
+		AlertWebhookURL      *string  `json:"alert_webhook_url"`
+		TimePenaltyStartHour *int     `json:"time_penalty_start_hour"`
+		TimePenaltyEndHour   *int     `json:"time_penalty_end_hour"`
+		TimePenaltyScore     *float64 `json:"time_penalty_score"`
+		TimePenaltyKeywords  *string  `json:"time_penalty_org_keywords"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, map[string]string{"error": "invalid JSON: " + err.Error()})
@@ -521,18 +584,29 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	st := s.status.Load().(*Status)
 
 	// Build what changed
-	var newTarget, newCustom, newProbeSource, newPingMode string
+	var newTarget, newCustom, newProbeSource, newCarrier, newPingMode, newFallbackBaselineIP, newAlertWebhookURL string
 	var newPingPort, newCheckInterval, newPingAttempts, newSwitchStableSec int
-	var newLatencyWeight, newJitterWeight, newLossWeight, newSwitchImprovement float64
+	var newFailedOrphanTTLHours int
+	var newTimePenaltyStartHour, newTimePenaltyEndHour int
+	var newLatencyWeight, newJitterWeight, newLossWeight, newSwitchImprovement, newTimePenaltyScore float64
+	var newTimePenaltyKeywords string
 	hasPingPort := false
 	hasCheckInterval := false
 	hasPingMode := false
+	hasCarrier := false
 	hasPingAttempts := false
 	hasLatencyWeight := false
 	hasJitterWeight := false
 	hasLossWeight := false
 	hasSwitchImprovement := false
 	hasSwitchStableSec := false
+	hasFailedOrphanTTLHours := false
+	hasFallbackBaselineIP := false
+	hasAlertWebhookURL := false
+	hasTimePenaltyStartHour := false
+	hasTimePenaltyEndHour := false
+	hasTimePenaltyScore := false
+	hasTimePenaltyKeywords := false
 
 	if body.TargetDomain != nil && *body.TargetDomain != "" && *body.TargetDomain != st.TargetDomain {
 		newTarget = *body.TargetDomain
@@ -542,6 +616,13 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.ProbeSource != nil && *body.ProbeSource != "" && *body.ProbeSource != st.ProbeSource {
 		newProbeSource = *body.ProbeSource
+	}
+	if body.Carrier != nil {
+		candidate := config.NormalizeCarrier(*body.Carrier)
+		if candidate != st.Carrier {
+			newCarrier = candidate
+			hasCarrier = true
+		}
 	}
 	if body.PingMode != nil && *body.PingMode != "" && *body.PingMode != st.PingMode {
 		newPingMode = *body.PingMode
@@ -579,8 +660,47 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		newSwitchStableSec = *body.SwitchStableSec
 		hasSwitchStableSec = true
 	}
+	currentTTLHours, currentFallbackIP, currentWebhookURL := s.safeguards()
+	currentTimePenaltyStartHour, currentTimePenaltyEndHour, currentTimePenaltyScore, currentTimePenaltyKeywords := s.timePenaltyConfig()
+	if body.FailedOrphanTTLHours != nil && *body.FailedOrphanTTLHours >= 0 && *body.FailedOrphanTTLHours != currentTTLHours {
+		newFailedOrphanTTLHours = *body.FailedOrphanTTLHours
+		hasFailedOrphanTTLHours = true
+	}
+	if body.FallbackBaselineIP != nil {
+		candidate := strings.TrimSpace(*body.FallbackBaselineIP)
+		if candidate != currentFallbackIP {
+			newFallbackBaselineIP = candidate
+			hasFallbackBaselineIP = true
+		}
+	}
+	if body.AlertWebhookURL != nil {
+		candidate := strings.TrimSpace(*body.AlertWebhookURL)
+		if candidate != currentWebhookURL {
+			newAlertWebhookURL = candidate
+			hasAlertWebhookURL = true
+		}
+	}
+	if body.TimePenaltyStartHour != nil && *body.TimePenaltyStartHour != currentTimePenaltyStartHour {
+		newTimePenaltyStartHour = *body.TimePenaltyStartHour
+		hasTimePenaltyStartHour = true
+	}
+	if body.TimePenaltyEndHour != nil && *body.TimePenaltyEndHour != currentTimePenaltyEndHour {
+		newTimePenaltyEndHour = *body.TimePenaltyEndHour
+		hasTimePenaltyEndHour = true
+	}
+	if body.TimePenaltyScore != nil && *body.TimePenaltyScore != currentTimePenaltyScore {
+		newTimePenaltyScore = *body.TimePenaltyScore
+		hasTimePenaltyScore = true
+	}
+	if body.TimePenaltyKeywords != nil {
+		candidate := strings.TrimSpace(*body.TimePenaltyKeywords)
+		if candidate != currentTimePenaltyKeywords {
+			newTimePenaltyKeywords = candidate
+			hasTimePenaltyKeywords = true
+		}
+	}
 
-	if newTarget == "" && newCustom == "" && newProbeSource == "" && !hasPingMode && !hasPingPort && !hasCheckInterval && !hasPingAttempts && !hasLatencyWeight && !hasJitterWeight && !hasLossWeight && !hasSwitchImprovement && !hasSwitchStableSec {
+	if newTarget == "" && newCustom == "" && newProbeSource == "" && !hasCarrier && !hasPingMode && !hasPingPort && !hasCheckInterval && !hasPingAttempts && !hasLatencyWeight && !hasJitterWeight && !hasLossWeight && !hasSwitchImprovement && !hasSwitchStableSec && !hasFailedOrphanTTLHours && !hasFallbackBaselineIP && !hasAlertWebhookURL && !hasTimePenaltyStartHour && !hasTimePenaltyEndHour && !hasTimePenaltyScore && !hasTimePenaltyKeywords {
 		writeJSON(w, map[string]string{"error": "no changes or empty values"})
 		return
 	}
@@ -601,6 +721,12 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	if newProbeSource != "" {
 		if err := config.UpdateYAMLField(s.cfgPath, "probe_source", newProbeSource, true); err != nil {
 			writeJSON(w, map[string]string{"error": "persist probe_source: " + err.Error()})
+			return
+		}
+	}
+	if hasCarrier {
+		if err := config.UpdateYAMLField(s.cfgPath, "carrier", newCarrier, true); err != nil {
+			writeJSON(w, map[string]string{"error": "persist carrier: " + err.Error()})
 			return
 		}
 	}
@@ -662,6 +788,70 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if hasFailedOrphanTTLHours {
+		if err := config.UpdateYAMLField(s.cfgPath, "failed_orphan_ttl_hours", fmt.Sprintf("%d", newFailedOrphanTTLHours), false); err != nil {
+			writeJSON(w, map[string]string{"error": "persist failed_orphan_ttl_hours: " + err.Error()})
+			return
+		}
+	}
+	if hasFallbackBaselineIP {
+		if newFallbackBaselineIP != "" && net.ParseIP(newFallbackBaselineIP) == nil {
+			writeJSON(w, map[string]string{"error": "fallback_baseline_ip must be a valid IP"})
+			return
+		}
+		if err := config.UpdateYAMLField(s.cfgPath, "fallback_baseline_ip", newFallbackBaselineIP, true); err != nil {
+			writeJSON(w, map[string]string{"error": "persist fallback_baseline_ip: " + err.Error()})
+			return
+		}
+	}
+	if hasAlertWebhookURL {
+		if newAlertWebhookURL != "" {
+			if _, err := url.ParseRequestURI(newAlertWebhookURL); err != nil {
+				writeJSON(w, map[string]string{"error": "alert_webhook_url is invalid: " + err.Error()})
+				return
+			}
+		}
+		if err := config.UpdateYAMLField(s.cfgPath, "alert_webhook_url", newAlertWebhookURL, true); err != nil {
+			writeJSON(w, map[string]string{"error": "persist alert_webhook_url: " + err.Error()})
+			return
+		}
+	}
+	if hasTimePenaltyStartHour {
+		if newTimePenaltyStartHour < 0 || newTimePenaltyStartHour > 23 {
+			writeJSON(w, map[string]string{"error": "time_penalty_start_hour must be between 0 and 23"})
+			return
+		}
+		if err := config.UpdateYAMLField(s.cfgPath, "time_penalty_start_hour", fmt.Sprintf("%d", newTimePenaltyStartHour), false); err != nil {
+			writeJSON(w, map[string]string{"error": "persist time_penalty_start_hour: " + err.Error()})
+			return
+		}
+	}
+	if hasTimePenaltyEndHour {
+		if newTimePenaltyEndHour < 0 || newTimePenaltyEndHour > 24 {
+			writeJSON(w, map[string]string{"error": "time_penalty_end_hour must be between 0 and 24"})
+			return
+		}
+		if err := config.UpdateYAMLField(s.cfgPath, "time_penalty_end_hour", fmt.Sprintf("%d", newTimePenaltyEndHour), false); err != nil {
+			writeJSON(w, map[string]string{"error": "persist time_penalty_end_hour: " + err.Error()})
+			return
+		}
+	}
+	if hasTimePenaltyScore {
+		if newTimePenaltyScore < 0 {
+			writeJSON(w, map[string]string{"error": "time_penalty_score cannot be negative"})
+			return
+		}
+		if err := config.UpdateYAMLField(s.cfgPath, "time_penalty_score", fmt.Sprintf("%.2f", newTimePenaltyScore), false); err != nil {
+			writeJSON(w, map[string]string{"error": "persist time_penalty_score: " + err.Error()})
+			return
+		}
+	}
+	if hasTimePenaltyKeywords {
+		if err := config.UpdateYAMLField(s.cfgPath, "time_penalty_org_keywords", newTimePenaltyKeywords, true); err != nil {
+			writeJSON(w, map[string]string{"error": "persist time_penalty_org_keywords: " + err.Error()})
+			return
+		}
+	}
 
 	// Notify main loop
 	if s.onConfig != nil {
@@ -676,6 +866,10 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		finalProbeSource := newProbeSource
 		if finalProbeSource == "" {
 			finalProbeSource = st.ProbeSource
+		}
+		finalCarrier := st.Carrier
+		if hasCarrier {
+			finalCarrier = newCarrier
 		}
 		finalPingMode := st.PingMode
 		if hasPingMode {
@@ -713,7 +907,70 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		if hasSwitchStableSec {
 			finalSwitchStableSec = newSwitchStableSec
 		}
-		s.onConfig(finalTarget, finalCustom, finalProbeSource, finalPingMode, finalPingPort, finalCheckInterval, finalPingAttempts, finalSwitchStableSec, finalLatencyWeight, finalJitterWeight, finalLossWeight, finalSwitchImprovement)
+		finalFailedOrphanTTLHours := currentTTLHours
+		if hasFailedOrphanTTLHours {
+			finalFailedOrphanTTLHours = newFailedOrphanTTLHours
+		}
+		finalFallbackBaselineIP := currentFallbackIP
+		if hasFallbackBaselineIP {
+			finalFallbackBaselineIP = newFallbackBaselineIP
+		}
+		finalAlertWebhookURL := currentWebhookURL
+		if hasAlertWebhookURL {
+			finalAlertWebhookURL = newAlertWebhookURL
+		}
+		finalTimePenaltyStartHour := currentTimePenaltyStartHour
+		if hasTimePenaltyStartHour {
+			finalTimePenaltyStartHour = newTimePenaltyStartHour
+		}
+		finalTimePenaltyEndHour := currentTimePenaltyEndHour
+		if hasTimePenaltyEndHour {
+			finalTimePenaltyEndHour = newTimePenaltyEndHour
+		}
+		finalTimePenaltyScore := currentTimePenaltyScore
+		if hasTimePenaltyScore {
+			finalTimePenaltyScore = newTimePenaltyScore
+		}
+		finalTimePenaltyKeywords := currentTimePenaltyKeywords
+		if hasTimePenaltyKeywords {
+			finalTimePenaltyKeywords = newTimePenaltyKeywords
+		}
+		s.onConfig(finalTarget, finalCustom, finalProbeSource, finalCarrier, finalPingMode, finalPingPort, finalCheckInterval, finalPingAttempts, finalSwitchStableSec, finalLatencyWeight, finalJitterWeight, finalLossWeight, finalSwitchImprovement, finalFailedOrphanTTLHours, finalFallbackBaselineIP, finalAlertWebhookURL, finalTimePenaltyStartHour, finalTimePenaltyEndHour, finalTimePenaltyScore, finalTimePenaltyKeywords)
+	}
+
+	if hasFailedOrphanTTLHours || hasFallbackBaselineIP || hasAlertWebhookURL {
+		nextTTLHours := currentTTLHours
+		if hasFailedOrphanTTLHours {
+			nextTTLHours = newFailedOrphanTTLHours
+		}
+		nextFallbackIP := currentFallbackIP
+		if hasFallbackBaselineIP {
+			nextFallbackIP = newFallbackBaselineIP
+		}
+		nextWebhookURL := currentWebhookURL
+		if hasAlertWebhookURL {
+			nextWebhookURL = newAlertWebhookURL
+		}
+		s.SetSafeguards(nextTTLHours, nextFallbackIP, nextWebhookURL)
+	}
+	if hasTimePenaltyStartHour || hasTimePenaltyEndHour || hasTimePenaltyScore || hasTimePenaltyKeywords {
+		nextTimePenaltyStartHour := currentTimePenaltyStartHour
+		if hasTimePenaltyStartHour {
+			nextTimePenaltyStartHour = newTimePenaltyStartHour
+		}
+		nextTimePenaltyEndHour := currentTimePenaltyEndHour
+		if hasTimePenaltyEndHour {
+			nextTimePenaltyEndHour = newTimePenaltyEndHour
+		}
+		nextTimePenaltyScore := currentTimePenaltyScore
+		if hasTimePenaltyScore {
+			nextTimePenaltyScore = newTimePenaltyScore
+		}
+		nextTimePenaltyKeywords := currentTimePenaltyKeywords
+		if hasTimePenaltyKeywords {
+			nextTimePenaltyKeywords = newTimePenaltyKeywords
+		}
+		s.SetTimePenaltyConfig(nextTimePenaltyStartHour, nextTimePenaltyEndHour, nextTimePenaltyScore, nextTimePenaltyKeywords)
 	}
 
 	// Update in-memory status
@@ -725,6 +982,16 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if newProbeSource != "" {
 		st.ProbeSource = newProbeSource
+	}
+	if hasCarrier {
+		st.Carrier = newCarrier
+	}
+	if hasCarrier || newProbeSource != "" {
+		if config.NormalizeCarrier(st.Carrier) == "auto" {
+			st.CarrierLabel = config.CarrierLabel(config.InferCarrier(st.ProbeSource)) + "（自动）"
+		} else {
+			st.CarrierLabel = config.CarrierLabel(st.Carrier)
+		}
 	}
 	if hasPingMode {
 		st.PingMode = newPingMode
@@ -755,8 +1022,8 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	s.UpdateStatus(st)
 
-	log.Printf("[config] updated: target_domain=%q custom_domain=%q probe_source=%q ping_mode=%q ping_port=%d check_interval=%d ping_attempts=%d latency_weight=%.2f jitter_weight=%.2f loss_weight=%.2f switch_improvement=%.2f switch_stable_seconds=%d",
-		newTarget, newCustom, newProbeSource, newPingMode, newPingPort, newCheckInterval, newPingAttempts, newLatencyWeight, newJitterWeight, newLossWeight, newSwitchImprovement, newSwitchStableSec)
+	log.Printf("[config] updated: target_domain=%q custom_domain=%q probe_source=%q carrier=%q ping_mode=%q ping_port=%d check_interval=%d ping_attempts=%d latency_weight=%.2f jitter_weight=%.2f loss_weight=%.2f switch_improvement=%.2f switch_stable_seconds=%d failed_orphan_ttl_hours=%d fallback_baseline_ip=%q alert_webhook_url_set=%t time_penalty=%02d-%02d/+%.2f keywords=%q",
+		newTarget, newCustom, newProbeSource, newCarrier, newPingMode, newPingPort, newCheckInterval, newPingAttempts, newLatencyWeight, newJitterWeight, newLossWeight, newSwitchImprovement, newSwitchStableSec, newFailedOrphanTTLHours, newFallbackBaselineIP, newAlertWebhookURL != "", newTimePenaltyStartHour, newTimePenaltyEndHour, newTimePenaltyScore, newTimePenaltyKeywords)
 	writeJSON(w, map[string]bool{"ok": true})
 }
 

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A Go service that resolves a target domain from multiple DNS servers, probes every discovered IP, scores them by latency/jitter/loss, and updates a Cloudflare DNS A record only when a candidate is meaningfully better and stable long enough. It includes a self-contained Web dashboard for status, history, logs, IP analytics, and live config editing.
+A Go service that resolves a target domain from carrier-aware DNS pools, probes every discovered IP, scores them by latency/jitter/loss, and updates a Cloudflare DNS A record only when a candidate is meaningfully better and stable long enough. It includes a self-contained Web dashboard for status, history, logs, IP analytics, and live config editing.
 
 **Executable**: `dns-latency-router` / `dns-latency-router.exe`  
 **Language**: Go 1.21  
@@ -49,7 +49,7 @@ dns-latency-router/
 
 `runOnce()`:
 
-1. Resolve all candidate IPs from configured DNS servers
+1. Resolve all candidate IPs from the effective carrier DNS pool
 2. Mark current active IP set in web state
 3. Probe each IP using ICMP or TCP, multiple attempts per IP
 4. Compute latency/jitter/loss/score
@@ -63,6 +63,7 @@ dns-latency-router/
 target_domain:
 custom_domain:
 probe_source:
+carrier:
 proxy_url:
 ping_mode:
 ping_port:
@@ -74,10 +75,18 @@ selection_jitter_weight:
 selection_loss_weight:
 switch_improvement_percent:
 switch_stable_seconds:
+time_penalty_start_hour:
+time_penalty_end_hour:
+time_penalty_score:
+time_penalty_org_keywords:
 check_interval:
 web_port:
 dns_servers:
 ```
+
+`carrier` supports `auto`, `unicom`, `telecom`, `mobile`, and `all`. `auto` infers the effective carrier from `probe_source`; `all` uses the configured `dns_servers` list directly. Carrier strategy only changes the resolver pool used to discover candidate IPs. The actual route still uses local latency/jitter/loss scoring and Cloudflare still stores one global A record.
+
+Time-based weighting can penalize specific ISP / IDC labels during configured local-hour windows. This is intended for cases like Google Anycast behaving well during the day but becoming volatile overnight; matching providers receive an additive score penalty so more stable lines can win even when their raw RTT is slightly higher.
 
 ## Current Web UI
 
@@ -85,7 +94,7 @@ The dashboard is embedded from `internal/web/dashboard_v2.html`. There is no sep
 
 Main modules:
 
-- Hero card with domain, live latency orb, probe source, current IP, next check, discovered count
+- Hero card with domain, live latency orb, probe source, effective carrier strategy, current IP, next check, discovered count
 - IP-specific latency history chart
 - IP performance cards with:
   - geo/ISP badge
@@ -103,6 +112,7 @@ Main modules:
   - basic
   - probe
   - routing
+    - includes time-window penalty controls for start hour, end hour, penalty score, and provider keywords
 
 ## Persistence
 
@@ -144,6 +154,7 @@ Implemented in `internal/web/server.go` and `persistence.go`.
 - `target_domain`
 - `custom_domain`
 - `probe_source`
+- `carrier`
 - `ping_mode`
 - `ping_port`
 - `check_interval`
@@ -153,6 +164,13 @@ Implemented in `internal/web/server.go` and `persistence.go`.
 - `selection_loss_weight`
 - `switch_improvement_percent`
 - `switch_stable_seconds`
+- `failed_orphan_ttl_hours`
+- `fallback_baseline_ip`
+- `alert_webhook_url`
+- `time_penalty_start_hour`
+- `time_penalty_end_hour`
+- `time_penalty_score`
+- `time_penalty_org_keywords`
 
 Changes are:
 

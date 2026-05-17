@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,14 +25,14 @@ type LogEntry struct {
 }
 
 type IPSample struct {
-	Time    time.Time `json:"time"`
-	IP      string    `json:"ip"`
-	Latency float64   `json:"latency"`
-	Jitter  float64   `json:"jitter"`
-	LossRate float64  `json:"lossRate"`
-	Score   float64   `json:"score"`
-	Success bool      `json:"success"`
-	Error   string    `json:"error,omitempty"`
+	Time     time.Time `json:"time"`
+	IP       string    `json:"ip"`
+	Latency  float64   `json:"latency"`
+	Jitter   float64   `json:"jitter"`
+	LossRate float64   `json:"lossRate"`
+	Score    float64   `json:"score"`
+	Success  bool      `json:"success"`
+	Error    string    `json:"error,omitempty"`
 }
 
 type IPStat struct {
@@ -197,6 +198,58 @@ func (s *Server) persistSamples() {
 	copy(samples, s.samples)
 	s.samplesMu.Unlock()
 	_ = writeJSONArray(s.samplesPath, samples)
+}
+
+func (s *Server) pruneFailedOrphanSamplesLocked() bool {
+	ttlHours, _, _ := s.safeguards()
+	if ttlHours <= 0 || len(s.samples) == 0 {
+		return false
+	}
+
+	cutoff := time.Now().Add(-time.Duration(ttlHours) * time.Hour)
+	lastByIP := make(map[string]IPSample)
+	for _, sample := range s.samples {
+		if sample.IP == "" {
+			continue
+		}
+		prev, ok := lastByIP[sample.IP]
+		if !ok || sample.Time.After(prev.Time) {
+			lastByIP[sample.IP] = sample
+		}
+	}
+
+	pruneIPs := make(map[string]struct{})
+	prunedList := make([]string, 0)
+	for ip, sample := range lastByIP {
+		if s.isIPActive(ip) || sample.Success || sample.Time.After(cutoff) {
+			continue
+		}
+		pruneIPs[ip] = struct{}{}
+		prunedList = append(prunedList, ip)
+	}
+	if len(pruneIPs) == 0 {
+		return false
+	}
+
+	out := s.samples[:0]
+	for _, sample := range s.samples {
+		if _, drop := pruneIPs[sample.IP]; drop {
+			continue
+		}
+		out = append(out, sample)
+	}
+	s.samples = out
+
+	s.geoMu.Lock()
+	for _, ip := range prunedList {
+		delete(s.geoCache, ip)
+		delete(s.geoPending, ip)
+	}
+	s.geoMu.Unlock()
+
+	sort.Strings(prunedList)
+	log.Printf("[gc] pruned %d orphaned failed IP(s) older than %dh: %v", len(prunedList), ttlHours, prunedList)
+	return true
 }
 
 func (s *Server) computeIPStats() []IPStat {

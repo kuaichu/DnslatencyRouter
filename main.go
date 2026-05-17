@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"time"
 
 	"dns-latency-router/internal/checker"
@@ -17,11 +23,54 @@ import (
 type switchController struct {
 	candidateIP    string
 	candidateSince time.Time
+	outageActive   bool
+	lastAlertAt    time.Time
+	orgCache       map[string]string
+}
+
+type cycleOutcome struct {
+	Best         *checker.Result
+	ActiveIP     string
+	ActiveResult *checker.Result
 }
 
 func (c *switchController) reset() {
 	c.candidateIP = ""
 	c.candidateSince = time.Time{}
+}
+
+func (c *switchController) clearOutage() {
+	c.outageActive = false
+}
+
+func (c *switchController) orgForIP(ip string) string {
+	if c.orgCache == nil {
+		c.orgCache = make(map[string]string)
+	}
+	return c.orgCache[ip]
+}
+
+func (c *switchController) storeOrg(ip, org string) {
+	if c.orgCache == nil {
+		c.orgCache = make(map[string]string)
+	}
+	if ip == "" || org == "" {
+		return
+	}
+	c.orgCache[ip] = org
+}
+
+func (c *switchController) shouldSendAlert(now time.Time) bool {
+	if !c.outageActive {
+		c.outageActive = true
+		c.lastAlertAt = now
+		return true
+	}
+	if now.Sub(c.lastAlertAt) >= 30*time.Minute {
+		c.lastAlertAt = now
+		return true
+	}
+	return false
 }
 
 func findResultByIP(results []checker.Result, ip string) *checker.Result {
@@ -63,9 +112,163 @@ func describeResult(r *checker.Result) string {
 	)
 }
 
+func summarizeFailures(results []checker.Result) []string {
+	lines := make([]string, 0, len(results))
+	for _, r := range results {
+		if r.Err == nil {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s: %v (loss %.0f%%)", r.IP, r.Err, r.LossRate))
+	}
+	return lines
+}
+
+func sendFallbackAlert(cfg *config.Config, currentIP string, resolved []string, results []checker.Result, reason string, usingFallback bool) {
+	if cfg.AlertWebhookURL == "" {
+		return
+	}
+	payload := map[string]interface{}{
+		"event":                "dns_latency_router_no_candidate",
+		"time":                 time.Now().Format(time.RFC3339),
+		"target_domain":        cfg.TargetDomain,
+		"custom_domain":        cfg.CustomDomain,
+		"carrier":              cfg.EffectiveCarrierLabel(),
+		"current_ip":           currentIP,
+		"fallback_baseline_ip": cfg.FallbackBaselineIP,
+		"using_fallback":       usingFallback,
+		"reason":               reason,
+		"resolved_ips":         resolved,
+		"failures":             summarizeFailures(results),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[error] alert webhook marshal failed: %v", err)
+		return
+	}
+	req, err := http.NewRequest("POST", cfg.AlertWebhookURL, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[error] alert webhook request build failed: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[error] alert webhook failed: %v", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		log.Printf("[error] alert webhook returned status %d", resp.StatusCode)
+		return
+	}
+	log.Printf("[alert] webhook sent for no-candidate event")
+}
+
+func fetchOrgForIP(ip string) string {
+	if net.ParseIP(ip) == nil {
+		return ""
+	}
+	client := &http.Client{Timeout: 4 * time.Second}
+	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,isp", ip)
+	resp, err := client.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var payload struct {
+		Status string `json:"status"`
+		ISP    string `json:"isp"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return ""
+	}
+	if payload.Status != "success" {
+		return ""
+	}
+	return strings.TrimSpace(payload.ISP)
+}
+
+func timePenaltyForResult(cfg *config.Config, now time.Time, org string) (float64, string) {
+	if cfg.TimePenaltyScore <= 0 || org == "" || !cfg.TimePenaltyActiveAt(now) {
+		return 0, ""
+	}
+	orgLower := strings.ToLower(org)
+	for _, keyword := range cfg.TimePenaltyKeywords() {
+		if strings.Contains(orgLower, keyword) {
+			return cfg.TimePenaltyScore, keyword
+		}
+	}
+	return 0, ""
+}
+
+func applyTimePenalty(cfg *config.Config, sc *switchController, results []checker.Result, now time.Time) {
+	if cfg.TimePenaltyScore <= 0 || !cfg.TimePenaltyActiveAt(now) {
+		return
+	}
+	for i := range results {
+		r := &results[i]
+		if r.Err != nil {
+			continue
+		}
+		org := sc.orgForIP(r.IP)
+		if org == "" {
+			org = fetchOrgForIP(r.IP)
+			sc.storeOrg(r.IP, org)
+		}
+		penalty, matchedKeyword := timePenaltyForResult(cfg, now, org)
+		if penalty <= 0 {
+			continue
+		}
+		r.Score += penalty
+		log.Printf("[score] %s: +%.2f time-window penalty (org=%s, keyword=%s, hour=%02d)", r.IP, penalty, org, matchedKeyword, now.Hour())
+	}
+	sort.Slice(results, func(i, j int) bool {
+		ri, rj := results[i], results[j]
+		if ri.Err != nil && rj.Err != nil {
+			return ri.IP < rj.IP
+		}
+		if ri.Err != nil {
+			return false
+		}
+		if rj.Err != nil {
+			return true
+		}
+		if ri.Score != rj.Score {
+			return ri.Score < rj.Score
+		}
+		if ri.LossRate != rj.LossRate {
+			return ri.LossRate < rj.LossRate
+		}
+		return ri.Latency < rj.Latency
+	})
+}
+
+func applyCycleOutcome(st *web.Status, outcome *cycleOutcome) bool {
+	if outcome == nil {
+		st.Latency = 0
+		return false
+	}
+
+	if outcome.ActiveIP != "" {
+		st.CurrentIP = outcome.ActiveIP
+	}
+
+	if outcome.ActiveResult != nil && outcome.ActiveResult.Err == nil {
+		st.Latency = float64(outcome.ActiveResult.Latency.Microseconds()) / 1000.0
+		return true
+	}
+
+	st.Latency = 0
+	return false
+}
+
 func runCheckCycle(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, nextCheck *time.Time, sc *switchController) {
 	*nextCheck = time.Now().Add(cfg.CheckInterval)
-	best := runOnce(cfg, cf, ws, sc)
+	outcome := runOnce(cfg, cf, ws, sc)
 
 	now := time.Now()
 	if ws != nil {
@@ -73,6 +276,8 @@ func runCheckCycle(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, ne
 		st.TargetDomain = cfg.TargetDomain
 		st.CustomDomain = cfg.CustomDomain
 		st.ProbeSource = cfg.ProbeSource
+		st.Carrier = cfg.Carrier
+		st.CarrierLabel = cfg.EffectiveCarrierLabel()
 		st.CheckIntervalSec = cfg.CheckIntervalSec
 		st.PingMode = cfg.PingMode
 		st.PingPort = cfg.PingPort
@@ -85,22 +290,18 @@ func runCheckCycle(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, ne
 		st.IsRunning = true
 		st.LastCheck = now.Format(time.RFC3339)
 		st.NextCheck = nextCheck.Format(time.RFC3339)
-		if best != nil {
-			st.CurrentIP = best.IP
-			st.Latency = float64(best.Latency.Microseconds()) / 1000.0
+		if applyCycleOutcome(st, outcome) {
 			ws.AddHistory(web.CheckRecord{
 				Time:    now,
-				IP:      best.IP,
-				Latency: float64(best.Latency.Microseconds()) / 1000.0,
+				IP:      st.CurrentIP,
+				Latency: st.Latency,
 				Success: true,
 			})
 		} else {
-			st.CurrentIP = ""
-			st.Latency = 0
 			ws.AddHistory(web.CheckRecord{
 				Time:    now,
 				Success: false,
-				Error:   "all IPs failed",
+				Error:   "active route latency unavailable",
 			})
 		}
 		ws.UpdateStatus(st)
@@ -108,10 +309,12 @@ func runCheckCycle(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, ne
 	log.Printf("next check in %s", cfg.CheckInterval)
 }
 
-func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *switchController) *checker.Result {
+func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *switchController) *cycleOutcome {
 	// 1. Resolve target domain from multiple DNS servers to discover all IPs
-	log.Printf("[check] resolving %s from %d DNS servers ...", cfg.TargetDomain, len(cfg.DNSServers))
-	ips, err := checker.ResolveFromAllDNS(cfg.TargetDomain, cfg.DNSServers)
+	dnsServers := cfg.EffectiveDNSServers()
+	log.Printf("[check] carrier policy: %s, using %d DNS servers", cfg.EffectiveCarrierLabel(), len(dnsServers))
+	log.Printf("[check] resolving %s from %d DNS servers ...", cfg.TargetDomain, len(dnsServers))
+	ips, err := checker.ResolveFromAllDNS(cfg.TargetDomain, dnsServers)
 	if err != nil {
 		log.Printf("[error] dns resolve failed: %v", err)
 		return nil
@@ -148,6 +351,7 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 		cfg.JitterWeight,
 		cfg.LossWeight,
 	)
+	applyTimePenalty(cfg, sc, results, time.Now())
 
 	if ws != nil {
 		now := time.Now()
@@ -198,23 +402,62 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 	}
 
 	if best == nil {
+		sc.reset()
 		log.Printf("[error] all %d IP(s) failed to respond", len(ips))
-		return nil
+		currentIP, err := cf.CurrentIP()
+		if err != nil {
+			log.Printf("[error] read current Cloudflare record failed: %v", err)
+			if sc.shouldSendAlert(time.Now()) {
+				sendFallbackAlert(cfg, "", ips, results, "all candidates failed and current record could not be read", false)
+			}
+			return &cycleOutcome{}
+		}
+		usingFallback := false
+		if cfg.FallbackBaselineIP != "" {
+			usingFallback = true
+			if currentIP == cfg.FallbackBaselineIP {
+				log.Printf("[fallback] no healthy candidates, baseline %s is already active", cfg.FallbackBaselineIP)
+			} else {
+				log.Printf("[fallback] no healthy candidates, switching to baseline %s", cfg.FallbackBaselineIP)
+				if err := cf.UpdateRecord(cfg.FallbackBaselineIP); err != nil {
+					log.Printf("[error] fallback baseline update failed: %v", err)
+				} else {
+					currentIP = cfg.FallbackBaselineIP
+					log.Printf("[fallback] baseline route applied")
+				}
+			}
+		}
+		if sc.shouldSendAlert(time.Now()) {
+			reason := "all candidates failed; keeping current route"
+			if usingFallback {
+				reason = "all candidates failed; fallback baseline engaged"
+			}
+			sendFallbackAlert(cfg, currentIP, ips, results, reason, usingFallback)
+		}
+		return &cycleOutcome{
+			ActiveIP:     currentIP,
+			ActiveResult: findResultByIP(results, currentIP),
+		}
 	}
+	sc.clearOutage()
 
 	log.Printf("[check] best candidate: %s (%s)", best.IP, describeResult(best))
 
 	currentIP, err := cf.CurrentIP()
 	if err != nil {
 		log.Printf("[error] read current Cloudflare record failed: %v", err)
-		return best
+		return &cycleOutcome{Best: best}
 	}
 
 	current := findResultByIP(results, currentIP)
 	if currentIP == best.IP {
 		sc.reset()
 		log.Printf("[update] current record already points to %s, no switch needed", currentIP)
-		return best
+		return &cycleOutcome{
+			Best:         best,
+			ActiveIP:     currentIP,
+			ActiveResult: best,
+		}
 	}
 
 	if !shouldReplaceCurrent(current, best, cfg) {
@@ -226,7 +469,11 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 			describeResult(current),
 			describeResult(best),
 		)
-		return best
+		return &cycleOutcome{
+			Best:         best,
+			ActiveIP:     currentIP,
+			ActiveResult: current,
+		}
 	}
 
 	now := time.Now()
@@ -235,25 +482,41 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 		sc.candidateSince = now
 		log.Printf("[update] candidate %s is better than current %s; observing stability for %d cycles (~%ds)",
 			best.IP, currentIP, stableCycles(cfg), cfg.SwitchStableSec)
-		return best
+		return &cycleOutcome{
+			Best:         best,
+			ActiveIP:     currentIP,
+			ActiveResult: current,
+		}
 	}
 
 	if cfg.SwitchStableSec > 0 && now.Sub(sc.candidateSince) < time.Duration(cfg.SwitchStableSec)*time.Second {
 		remaining := time.Duration(cfg.SwitchStableSec)*time.Second - now.Sub(sc.candidateSince)
 		log.Printf("[update] candidate %s still stabilizing for %s before switch", best.IP, remaining.Round(time.Second))
-		return best
+		return &cycleOutcome{
+			Best:         best,
+			ActiveIP:     currentIP,
+			ActiveResult: current,
+		}
 	}
 
 	log.Printf("[update] switching %s A record -> %s (current %s, candidate %s)",
 		cfg.CustomDomain, best.IP, describeResult(current), describeResult(best))
 	if err := cf.UpdateRecord(best.IP); err != nil {
 		log.Printf("[error] cloudflare update failed: %v", err)
-		return best
+		return &cycleOutcome{
+			Best:         best,
+			ActiveIP:     currentIP,
+			ActiveResult: current,
+		}
 	}
 	sc.reset()
 	log.Printf("[update] switch applied")
 
-	return best
+	return &cycleOutcome{
+		Best:         best,
+		ActiveIP:     best.IP,
+		ActiveResult: best,
+	}
 }
 
 func main() {
@@ -279,10 +542,11 @@ func main() {
 	if cfg.WebPort > 0 {
 		// Clone cfg pointer for the callback closure
 		cfgPtr := cfg
-		ws = web.New(cfg.WebPort, configPath, triggerCh, func(targetDomain, customDomain, probeSource, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64) {
+		ws = web.New(cfg.WebPort, configPath, triggerCh, func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string) {
 			cfgPtr.TargetDomain = targetDomain
 			cfgPtr.CustomDomain = customDomain
 			cfgPtr.ProbeSource = probeSource
+			cfgPtr.Carrier = config.NormalizeCarrier(carrier)
 			if pingMode != "" {
 				cfgPtr.PingMode = pingMode
 			}
@@ -311,9 +575,29 @@ func main() {
 			if switchStableSec >= 0 {
 				cfgPtr.SwitchStableSec = switchStableSec
 			}
-			log.Printf("[config] applied: target_domain=%q custom_domain=%q probe_source=%q ping_mode=%q ping_port=%d check_interval=%d ping_attempts=%d latency_weight=%.2f jitter_weight=%.2f loss_weight=%.2f switch_improvement=%.2f switch_stable_seconds=%d",
-				targetDomain, customDomain, probeSource, pingMode, pingPort, checkInterval, pingAttempts, latencyWeight, jitterWeight, lossWeight, switchImprovement, switchStableSec)
+			if failedOrphanTTLHours >= 0 {
+				cfgPtr.FailedOrphanTTLHours = failedOrphanTTLHours
+				cfgPtr.FailedOrphanTTL = time.Duration(failedOrphanTTLHours) * time.Hour
+			}
+			cfgPtr.FallbackBaselineIP = fallbackBaselineIP
+			cfgPtr.AlertWebhookURL = alertWebhookURL
+			if timePenaltyStartHour >= 0 {
+				cfgPtr.TimePenaltyStartHour = timePenaltyStartHour
+			}
+			if timePenaltyEndHour >= 0 {
+				cfgPtr.TimePenaltyEndHour = timePenaltyEndHour
+			}
+			if timePenaltyScore >= 0 {
+				cfgPtr.TimePenaltyScore = timePenaltyScore
+			}
+			cfgPtr.TimePenaltyOrgKeywords = timePenaltyOrgKeywords
+			ws.SetSafeguards(cfgPtr.FailedOrphanTTLHours, cfgPtr.FallbackBaselineIP, cfgPtr.AlertWebhookURL)
+			ws.SetTimePenaltyConfig(cfgPtr.TimePenaltyStartHour, cfgPtr.TimePenaltyEndHour, cfgPtr.TimePenaltyScore, cfgPtr.TimePenaltyOrgKeywords)
+			log.Printf("[config] applied: target_domain=%q custom_domain=%q probe_source=%q carrier=%q effective_carrier=%q ping_mode=%q ping_port=%d check_interval=%d ping_attempts=%d latency_weight=%.2f jitter_weight=%.2f loss_weight=%.2f switch_improvement=%.2f switch_stable_seconds=%d failed_orphan_ttl_hours=%d fallback_baseline_ip=%q alert_webhook_url_set=%t time_penalty=%02d-%02d/+%.2f keywords=%q",
+				targetDomain, customDomain, probeSource, cfgPtr.Carrier, cfgPtr.EffectiveCarrierLabel(), pingMode, pingPort, checkInterval, pingAttempts, latencyWeight, jitterWeight, lossWeight, switchImprovement, switchStableSec, cfgPtr.FailedOrphanTTLHours, cfgPtr.FallbackBaselineIP, cfgPtr.AlertWebhookURL != "", cfgPtr.TimePenaltyStartHour, cfgPtr.TimePenaltyEndHour, cfgPtr.TimePenaltyScore, cfgPtr.TimePenaltyOrgKeywords)
 		})
+		ws.SetSafeguards(cfg.FailedOrphanTTLHours, cfg.FallbackBaselineIP, cfg.AlertWebhookURL)
+		ws.SetTimePenaltyConfig(cfg.TimePenaltyStartHour, cfg.TimePenaltyEndHour, cfg.TimePenaltyScore, cfg.TimePenaltyOrgKeywords)
 		ws.Start()
 		ws.WaitReady()
 		log.SetOutput(ws.LogWriter())
@@ -331,19 +615,21 @@ func main() {
 	// Set initial web status
 	if ws != nil {
 		ws.UpdateStatus(&web.Status{
-			TargetDomain:     cfg.TargetDomain,
-			CustomDomain:     cfg.CustomDomain,
-			ProbeSource:      cfg.ProbeSource,
-			CheckIntervalSec: cfg.CheckIntervalSec,
-			PingMode:         cfg.PingMode,
-			PingPort:         cfg.PingPort,
-			PingAttempts:     cfg.PingAttempts,
-			LatencyWeight:    cfg.LatencyWeight,
-			JitterWeight:     cfg.JitterWeight,
-			LossWeight:       cfg.LossWeight,
+			TargetDomain:      cfg.TargetDomain,
+			CustomDomain:      cfg.CustomDomain,
+			ProbeSource:       cfg.ProbeSource,
+			Carrier:           cfg.Carrier,
+			CarrierLabel:      cfg.EffectiveCarrierLabel(),
+			CheckIntervalSec:  cfg.CheckIntervalSec,
+			PingMode:          cfg.PingMode,
+			PingPort:          cfg.PingPort,
+			PingAttempts:      cfg.PingAttempts,
+			LatencyWeight:     cfg.LatencyWeight,
+			JitterWeight:      cfg.JitterWeight,
+			LossWeight:        cfg.LossWeight,
 			SwitchImprovement: cfg.SwitchImprovement,
-			SwitchStableSec:  cfg.SwitchStableSec,
-			IsRunning:        true,
+			SwitchStableSec:   cfg.SwitchStableSec,
+			IsRunning:         true,
 		})
 	}
 
@@ -352,7 +638,7 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt)
 
 	// Run immediately, then on timer
-	firstBest := runOnce(cfg, cf, ws, sc)
+	firstOutcome := runOnce(cfg, cf, ws, sc)
 	now := time.Now()
 	nextCheck := now.Add(cfg.CheckInterval)
 	if ws != nil {
@@ -360,6 +646,8 @@ func main() {
 		st.TargetDomain = cfg.TargetDomain
 		st.CustomDomain = cfg.CustomDomain
 		st.ProbeSource = cfg.ProbeSource
+		st.Carrier = cfg.Carrier
+		st.CarrierLabel = cfg.EffectiveCarrierLabel()
 		st.CheckIntervalSec = cfg.CheckIntervalSec
 		st.PingMode = cfg.PingMode
 		st.PingPort = cfg.PingPort
@@ -372,22 +660,18 @@ func main() {
 		st.IsRunning = true
 		st.LastCheck = now.Format(time.RFC3339)
 		st.NextCheck = nextCheck.Format(time.RFC3339)
-		if firstBest != nil {
-			st.CurrentIP = firstBest.IP
-			st.Latency = float64(firstBest.Latency.Microseconds()) / 1000.0
+		if applyCycleOutcome(st, firstOutcome) {
 			ws.AddHistory(web.CheckRecord{
 				Time:    now,
-				IP:      firstBest.IP,
-				Latency: float64(firstBest.Latency.Microseconds()) / 1000.0,
+				IP:      st.CurrentIP,
+				Latency: st.Latency,
 				Success: true,
 			})
 		} else {
-			st.CurrentIP = ""
-			st.Latency = 0
 			ws.AddHistory(web.CheckRecord{
 				Time:    now,
 				Success: false,
-				Error:   "all IPs failed",
+				Error:   "active route latency unavailable",
 			})
 		}
 		ws.UpdateStatus(st)
