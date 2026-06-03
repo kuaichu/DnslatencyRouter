@@ -175,6 +175,9 @@ Implemented in `internal/web/server.go` and `persistence.go`.
 - `time_penalty_end_hour`
 - `time_penalty_score`
 - `time_penalty_org_keywords`
+- `cloudflare_api_token` (write-only; never returned by GET)
+- `cloudflare_zone_id`
+- `cloudflare_record_id`
 
 `/api/airport-profiles` supports live updates for multi-airport routing:
 
@@ -195,7 +198,7 @@ Changes are:
 
 Common real deployment target used in this project history:
 
-- Host: `10.0.0.231`
+- Host: `your-server-ip`
 - Path: `/opt/dns-latency-router`
 - Process manager: `pm2`
 - Process name: `dns-latency-router`

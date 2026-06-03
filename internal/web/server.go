@@ -100,6 +100,7 @@ type Server struct {
 	cfgPath              string                                                                                                                                                                                                                                                                                                                                                                               // for persisting config changes
 	onConfig             func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string) // callback to notify main loop
 	onProfiles           func(*config.Config)
+	onCloudflare         func(config.CloudflareConfig)
 	triggerCh            chan<- struct{} // signal main loop to run a check immediately
 	logBuf               []LogEntry
 	logBufMu             sync.Mutex
@@ -226,6 +227,12 @@ func (s *Server) SetTimePenaltyConfig(startHour, endHour int, score float64, key
 func (s *Server) SetProfilesCallback(cb func(*config.Config)) {
 	s.runtimeCfgMu.Lock()
 	s.onProfiles = cb
+	s.runtimeCfgMu.Unlock()
+}
+
+func (s *Server) SetCloudflareCallback(cb func(config.CloudflareConfig)) {
+	s.runtimeCfgMu.Lock()
+	s.onCloudflare = cb
 	s.runtimeCfgMu.Unlock()
 }
 
@@ -801,7 +808,7 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		st := s.status.Load().(*Status)
 		ttlHours, fallbackIP, webhookURL := s.safeguards()
 		timePenaltyStartHour, timePenaltyEndHour, timePenaltyScore, timePenaltyKeywords := s.timePenaltyConfig()
-		writeJSON(w, map[string]interface{}{
+		payload := map[string]interface{}{
 			"target_domain":              st.TargetDomain,
 			"custom_domain":              st.CustomDomain,
 			"probe_source":               st.ProbeSource,
@@ -823,7 +830,16 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			"time_penalty_end_hour":      timePenaltyEndHour,
 			"time_penalty_score":         timePenaltyScore,
 			"time_penalty_org_keywords":  timePenaltyKeywords,
-		})
+			"cloudflare_api_token_set":   false,
+			"cloudflare_zone_id":         "",
+			"cloudflare_record_id":       "",
+		}
+		if cfg, err := config.Load(s.cfgPath); err == nil {
+			payload["cloudflare_api_token_set"] = strings.TrimSpace(cfg.Cloudflare.APIToken) != ""
+			payload["cloudflare_zone_id"] = cfg.Cloudflare.ZoneID
+			payload["cloudflare_record_id"] = cfg.Cloudflare.RecordID
+		}
+		writeJSON(w, payload)
 		return
 	}
 
@@ -853,6 +869,9 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		TimePenaltyEndHour   *int     `json:"time_penalty_end_hour"`
 		TimePenaltyScore     *float64 `json:"time_penalty_score"`
 		TimePenaltyKeywords  *string  `json:"time_penalty_org_keywords"`
+		CloudflareAPIToken   *string  `json:"cloudflare_api_token"`
+		CloudflareZoneID     *string  `json:"cloudflare_zone_id"`
+		CloudflareRecordID   *string  `json:"cloudflare_record_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, map[string]string{"error": "invalid JSON: " + err.Error()})
@@ -886,6 +905,9 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	hasTimePenaltyEndHour := false
 	hasTimePenaltyScore := false
 	hasTimePenaltyKeywords := false
+	hasCloudflareAPIToken := false
+	hasCloudflareZoneID := false
+	hasCloudflareRecordID := false
 
 	if !multiProfileMode && body.TargetDomain != nil && *body.TargetDomain != "" && *body.TargetDomain != st.TargetDomain {
 		newTarget = *body.TargetDomain
@@ -941,6 +963,12 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	currentTTLHours, currentFallbackIP, currentWebhookURL := s.safeguards()
 	currentTimePenaltyStartHour, currentTimePenaltyEndHour, currentTimePenaltyScore, currentTimePenaltyKeywords := s.timePenaltyConfig()
+	cfgForCloudflare, cfgErr := config.Load(s.cfgPath)
+	if cfgErr != nil {
+		writeJSON(w, map[string]string{"error": "load config: " + cfgErr.Error()})
+		return
+	}
+	nextCloudflare := cfgForCloudflare.Cloudflare
 	if body.FailedOrphanTTLHours != nil && *body.FailedOrphanTTLHours >= 0 && *body.FailedOrphanTTLHours != currentTTLHours {
 		newFailedOrphanTTLHours = *body.FailedOrphanTTLHours
 		hasFailedOrphanTTLHours = true
@@ -978,8 +1006,29 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			hasTimePenaltyKeywords = true
 		}
 	}
+	if body.CloudflareAPIToken != nil {
+		candidate := strings.TrimSpace(*body.CloudflareAPIToken)
+		if candidate != "" && candidate != nextCloudflare.APIToken {
+			nextCloudflare.APIToken = candidate
+			hasCloudflareAPIToken = true
+		}
+	}
+	if body.CloudflareZoneID != nil {
+		candidate := strings.TrimSpace(*body.CloudflareZoneID)
+		if candidate != "" && candidate != nextCloudflare.ZoneID {
+			nextCloudflare.ZoneID = candidate
+			hasCloudflareZoneID = true
+		}
+	}
+	if body.CloudflareRecordID != nil {
+		candidate := strings.TrimSpace(*body.CloudflareRecordID)
+		if candidate != "" && candidate != nextCloudflare.RecordID {
+			nextCloudflare.RecordID = candidate
+			hasCloudflareRecordID = true
+		}
+	}
 
-	if newTarget == "" && newCustom == "" && newProbeSource == "" && !hasCarrier && !hasPingMode && !hasPingPort && !hasCheckInterval && !hasPingAttempts && !hasLatencyWeight && !hasJitterWeight && !hasLossWeight && !hasSwitchImprovement && !hasSwitchStableSec && !hasFailedOrphanTTLHours && !hasFallbackBaselineIP && !hasAlertWebhookURL && !hasTimePenaltyStartHour && !hasTimePenaltyEndHour && !hasTimePenaltyScore && !hasTimePenaltyKeywords {
+	if newTarget == "" && newCustom == "" && newProbeSource == "" && !hasCarrier && !hasPingMode && !hasPingPort && !hasCheckInterval && !hasPingAttempts && !hasLatencyWeight && !hasJitterWeight && !hasLossWeight && !hasSwitchImprovement && !hasSwitchStableSec && !hasFailedOrphanTTLHours && !hasFallbackBaselineIP && !hasAlertWebhookURL && !hasTimePenaltyStartHour && !hasTimePenaltyEndHour && !hasTimePenaltyScore && !hasTimePenaltyKeywords && !hasCloudflareAPIToken && !hasCloudflareZoneID && !hasCloudflareRecordID {
 		writeJSON(w, map[string]string{"error": "no changes or empty values"})
 		return
 	}
@@ -1129,6 +1178,21 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		if err := config.UpdateYAMLField(s.cfgPath, "time_penalty_org_keywords", newTimePenaltyKeywords, true); err != nil {
 			writeJSON(w, map[string]string{"error": "persist time_penalty_org_keywords: " + err.Error()})
 			return
+		}
+	}
+	if hasCloudflareAPIToken || hasCloudflareZoneID || hasCloudflareRecordID {
+		nextCfg, err := config.Load(s.cfgPath)
+		if err != nil {
+			writeJSON(w, map[string]string{"error": "reload config: " + err.Error()})
+			return
+		}
+		nextCfg.Cloudflare = nextCloudflare
+		if err := config.Save(s.cfgPath, nextCfg); err != nil {
+			writeJSON(w, map[string]string{"error": "persist cloudflare: " + err.Error()})
+			return
+		}
+		if s.onCloudflare != nil {
+			s.onCloudflare(nextCloudflare)
 		}
 	}
 

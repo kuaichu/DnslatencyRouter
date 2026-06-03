@@ -13,7 +13,7 @@
 - 不是看到更低延迟就立即切换，而是带有 `阈值 + 稳定时长` 的防抖策略
 - 支持按本地时间窗口对指定 IDC / ISP 动态加权，避免深夜抖动节点误切换
 - 支持多机场入口：每个机场可配置独立入口域名、缩写、探测源与运营商策略
-- 支持按 IP 归属地拆分地区记录，例如 `sntp-hk.example.com`、`sntp-my.example.com`
+- 支持按 IP 归属地拆分地区记录，例如 `airport-a-hk.example.net`、`airport-a-my.example.net`
 - Cloudflare API 支持走代理
 - Web 仪表盘支持在线修改主要配置并即时生效
 - Web 仪表盘内置全球 SVG 国旗资源，地区卡片不依赖系统 Emoji 或外部 CDN
@@ -242,7 +242,7 @@ cloudflare:
 
 target_domain: "api.openai.com"
 custom_domain: "your-proxy.example.com"
-probe_source: "宁波联通"
+probe_source: "城市运营商"
 carrier: "auto"
 
 check_interval: 300
@@ -280,52 +280,52 @@ dns_servers:
 ```yaml
 cloudflare:
   api_token: "your-api-token"
-  zone_id: "ziher-zone-id"
+  zone_id: "your-zone-id"
 
-base_domain: "ziher.eu.org"
+base_domain: "example.net"
 
 airport_profiles:
-  - id: "sntp"
-    name: "守候网络"
-    slug: "sntp"
+  - id: "airport-a"
+    name: "机场 A"
+    slug: "airport-a"
     target_domains:
-      - "entry-1.sntp.example"
-      - "entry-2.sntp.example"
-    probe_source: "宁波联通"
+      - "entry-a-1.example.com"
+      - "entry-a-2.example.com"
+    probe_source: "城市运营商"
     carrier: "auto"
     entry_record:
       label: "全局最快"
-      record_id: "cloudflare-record-id-for-sntp-entry"
+      record_id: "cloudflare-record-id-for-airport-a-entry"
     region_records:
       hk:
         label: "香港"
-        record_id: "cloudflare-record-id-for-sntp-hk"
+        record_id: "cloudflare-record-id-for-airport-a-hk"
       my:
         label: "马来西亚"
-        record_id: "cloudflare-record-id-for-sntp-my"
+        record_id: "cloudflare-record-id-for-airport-a-my"
 
-  - id: "jjz"
-    name: "搅局者"
-    slug: "jjz"
+  - id: "airport-b"
+    name: "机场 B"
+    slug: "airport-b"
     target_domains:
-      - "entry.jjz.example"
+      - "entry-b.example.com"
     entry_record:
-      record_id: "cloudflare-record-id-for-jjz-entry"
+      record_id: "cloudflare-record-id-for-airport-b-entry"
     region_records:
       hk:
         label: "香港"
-        record_id: "cloudflare-record-id-for-jjz-hk"
+        record_id: "cloudflare-record-id-for-airport-b-hk"
 ```
 
 上面的配置会自动对应这些域名：
 
-- `sntp-hk.ziher.eu.org`
-- `sntp-my.ziher.eu.org`
-- `sntp-entry.ziher.eu.org`
-- `jjz-entry.ziher.eu.org`
-- `jjz-hk.ziher.eu.org`
+- `airport-a-hk.example.net`
+- `airport-a-my.example.net`
+- `airport-a-entry.example.net`
+- `airport-b-entry.example.net`
+- `airport-b-hk.example.net`
 
-每轮检测会先解析机场入口域名；如果一个机场配置了多个 `target_domains`，会把这些域名解析出的 IP 合并去重后统一探测。随后再按 IP 归属地分组；例如解析出 3 个香港 IP 和 1 个马来西亚 IP 时，系统会在香港组内选最优 IP 更新 `sntp-hk.ziher.eu.org`，马来西亚组只有一个健康 IP 时则直接更新 `sntp-my.ziher.eu.org`。`entry_record` 会从该机场解析出的全部健康 IP 里选综合最优，更新到 `sntp-entry.ziher.eu.org`。每个机场和地区都有独立的稳定窗口，互不影响。
+每轮检测会先解析机场入口域名；如果一个机场配置了多个 `target_domains`，会把这些域名解析出的 IP 合并去重后统一探测。随后再按 IP 归属地分组；例如解析出 3 个香港 IP 和 1 个马来西亚 IP 时，系统会在香港组内选最优 IP 更新 `airport-a-hk.example.net`，马来西亚组只有一个健康 IP 时则直接更新 `airport-a-my.example.net`。`entry_record` 会从该机场解析出的全部健康 IP 里选综合最优，更新到 `airport-a-entry.example.net`。每个机场和地区都有独立的稳定窗口，互不影响。
 
 当前内置地区代码包括：
 

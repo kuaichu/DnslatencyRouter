@@ -81,7 +81,7 @@ func Load(path string) (*Config, error) {
 
 	cfg := &Config{
 		CheckIntervalSec:       300,
-		ProbeSource:            "宁波联通",
+		ProbeSource:            "本机网络",
 		Carrier:                "auto",
 		PingMode:               "icmp",
 		PingPort:               443,

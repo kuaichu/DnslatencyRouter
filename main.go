@@ -1062,6 +1062,7 @@ func main() {
 	// Manual check trigger channel
 	triggerCh := make(chan struct{}, 1)
 	sc := &switchController{}
+	var cf *cloudflare.Client
 
 	// Start web dashboard if configured
 	var ws *web.Server
@@ -1131,6 +1132,14 @@ func main() {
 			cfgPtr.Carrier = next.Carrier
 			log.Printf("[config] airport profiles applied: base_domain=%q profiles=%d", cfgPtr.BaseDomain, len(cfgPtr.AirportProfiles))
 		})
+		ws.SetCloudflareCallback(func(next config.CloudflareConfig) {
+			cfgPtr.Cloudflare = next
+			if !cfgPtr.HasAirportProfiles() {
+				cf = cloudflare.New(cfgPtr.Cloudflare.APIToken, cfgPtr.Cloudflare.ZoneID, cfgPtr.Cloudflare.RecordID, cfgPtr.ProxyURL)
+			}
+			log.Printf("[config] cloudflare credentials updated: token_set=%t zone_id_set=%t record_id_set=%t",
+				strings.TrimSpace(cfgPtr.Cloudflare.APIToken) != "", strings.TrimSpace(cfgPtr.Cloudflare.ZoneID) != "", strings.TrimSpace(cfgPtr.Cloudflare.RecordID) != "")
+		})
 		ws.SetSafeguards(cfg.FailedOrphanTTLHours, cfg.FallbackBaselineIP, cfg.AlertWebhookURL)
 		ws.SetTimePenaltyConfig(cfg.TimePenaltyStartHour, cfg.TimePenaltyEndHour, cfg.TimePenaltyScore, cfg.TimePenaltyOrgKeywords)
 		ws.Start()
@@ -1138,7 +1147,6 @@ func main() {
 		log.SetOutput(ws.LogWriter())
 	}
 
-	var cf *cloudflare.Client
 	if cfg.HasAirportProfiles() {
 		for _, profile := range cfg.AirportProfiles {
 			if profile.EntryRecord.CustomDomain != "" || profile.EntryRecord.RecordID != "" {
@@ -1154,7 +1162,8 @@ func main() {
 		if _, err := cf.GetRecord(); err != nil {
 			log.Printf("[error] Cloudflare API unreachable: %v (will retry on next cycle)", err)
 		} else {
-			log.Printf("cloudflare API access verified for record %s", cfg.Cloudflare.RecordID)
+			log.Printf("cloudflare API access verified: token_set=%t zone_id_set=%t record_id_set=%t",
+				strings.TrimSpace(cfg.Cloudflare.APIToken) != "", strings.TrimSpace(cfg.Cloudflare.ZoneID) != "", strings.TrimSpace(cfg.Cloudflare.RecordID) != "")
 		}
 	}
 
