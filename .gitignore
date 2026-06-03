@@ -1,6 +1,15 @@
 # Binaries
 dns-latency-router.exe
 dns-latency-router
+dns-latency-router-*
+*.zip
+*.tar.gz
+
+# Local config and runtime data
+config.yaml
+data/
+output/
+dist/
 
 # Logs
 logs/

@@ -25,18 +25,26 @@ type LogEntry struct {
 }
 
 type IPSample struct {
-	Time     time.Time `json:"time"`
-	IP       string    `json:"ip"`
-	Latency  float64   `json:"latency"`
-	Jitter   float64   `json:"jitter"`
-	LossRate float64   `json:"lossRate"`
-	Score    float64   `json:"score"`
-	Success  bool      `json:"success"`
-	Error    string    `json:"error,omitempty"`
+	Time        time.Time `json:"time"`
+	ProfileID   string    `json:"profileId,omitempty"`
+	ProfileName string    `json:"profileName,omitempty"`
+	Region      string    `json:"region,omitempty"`
+	RegionLabel string    `json:"regionLabel,omitempty"`
+	IP          string    `json:"ip"`
+	Latency     float64   `json:"latency"`
+	Jitter      float64   `json:"jitter"`
+	LossRate    float64   `json:"lossRate"`
+	Score       float64   `json:"score"`
+	Success     bool      `json:"success"`
+	Error       string    `json:"error,omitempty"`
 }
 
 type IPStat struct {
 	IP           string    `json:"ip"`
+	ProfileID    string    `json:"profileId,omitempty"`
+	ProfileName  string    `json:"profileName,omitempty"`
+	Region       string    `json:"region,omitempty"`
+	RegionLabel  string    `json:"regionLabel,omitempty"`
 	Geo          string    `json:"geo,omitempty"`
 	Active       bool      `json:"active"`
 	Status       string    `json:"status"`
@@ -50,8 +58,14 @@ type IPStat struct {
 	AvgLossRate  float64   `json:"avgLossRate"`
 	BestScore    float64   `json:"bestScore"`
 	LastScore    float64   `json:"lastScore"`
+	FirstSeen    time.Time `json:"firstSeen"`
 	LastSeen     time.Time `json:"lastSeen"`
+	LastActiveAt time.Time `json:"lastActiveAt"`
 	LastError    string    `json:"lastError,omitempty"`
+}
+
+func sampleKey(profileID, region, ip string) string {
+	return profileID + "|" + region + "|" + ip
 }
 
 func (s *Server) loadPersistedData() {
@@ -200,7 +214,7 @@ func (s *Server) persistSamples() {
 	_ = writeJSONArray(s.samplesPath, samples)
 }
 
-func (s *Server) pruneFailedOrphanSamplesLocked() bool {
+func (s *Server) pruneInactiveOrphanSamplesLocked() bool {
 	ttlHours, _, _ := s.safeguards()
 	if ttlHours <= 0 || len(s.samples) == 0 {
 		return false
@@ -212,20 +226,21 @@ func (s *Server) pruneFailedOrphanSamplesLocked() bool {
 		if sample.IP == "" {
 			continue
 		}
-		prev, ok := lastByIP[sample.IP]
+		key := sampleKey(sample.ProfileID, sample.Region, sample.IP)
+		prev, ok := lastByIP[key]
 		if !ok || sample.Time.After(prev.Time) {
-			lastByIP[sample.IP] = sample
+			lastByIP[key] = sample
 		}
 	}
 
 	pruneIPs := make(map[string]struct{})
 	prunedList := make([]string, 0)
-	for ip, sample := range lastByIP {
-		if s.isIPActive(ip) || sample.Success || sample.Time.After(cutoff) {
+	for key, sample := range lastByIP {
+		if s.isIPActiveInProfile(sample.ProfileID, sample.IP) || sample.Time.After(cutoff) {
 			continue
 		}
-		pruneIPs[ip] = struct{}{}
-		prunedList = append(prunedList, ip)
+		pruneIPs[key] = struct{}{}
+		prunedList = append(prunedList, sample.IP)
 	}
 	if len(pruneIPs) == 0 {
 		return false
@@ -233,7 +248,7 @@ func (s *Server) pruneFailedOrphanSamplesLocked() bool {
 
 	out := s.samples[:0]
 	for _, sample := range s.samples {
-		if _, drop := pruneIPs[sample.IP]; drop {
+		if _, drop := pruneIPs[sampleKey(sample.ProfileID, sample.Region, sample.IP)]; drop {
 			continue
 		}
 		out = append(out, sample)
@@ -248,7 +263,7 @@ func (s *Server) pruneFailedOrphanSamplesLocked() bool {
 	s.geoMu.Unlock()
 
 	sort.Strings(prunedList)
-	log.Printf("[gc] pruned %d orphaned failed IP(s) older than %dh: %v", len(prunedList), ttlHours, prunedList)
+	log.Printf("[gc] pruned %d inactive orphaned IP(s) with no refresh for more than %dh: %v", len(prunedList), ttlHours, prunedList)
 	return true
 }
 
@@ -262,24 +277,34 @@ func (s *Server) computeIPStats() []IPStat {
 	lossRateSum := make(map[string]float64)
 
 	for _, sample := range s.samples {
-		stat := statsMap[sample.IP]
+		key := sampleKey(sample.ProfileID, sample.Region, sample.IP)
+		stat := statsMap[key]
 		if stat == nil {
 			stat = &IPStat{
 				IP:          sample.IP,
+				ProfileID:   sample.ProfileID,
+				ProfileName: sample.ProfileName,
+				Region:      sample.Region,
+				RegionLabel: sample.RegionLabel,
 				BestLatency: 0,
+				FirstSeen:   sample.Time,
 			}
-			statsMap[sample.IP] = stat
+			statsMap[key] = stat
 		}
 
 		stat.SeenCount++
+		if sample.Time.Before(stat.FirstSeen) {
+			stat.FirstSeen = sample.Time
+		}
 		if sample.Time.After(stat.LastSeen) {
 			stat.LastSeen = sample.Time
+			stat.LastActiveAt = sample.Time
 			stat.LastLatency = sample.Latency
 			stat.LastScore = sample.Score
 			stat.LastError = sample.Error
 		}
 
-		lossRateSum[sample.IP] += sample.LossRate
+		lossRateSum[key] += sample.LossRate
 
 		if !sample.Success {
 			if sample.Error != "" {
@@ -289,8 +314,8 @@ func (s *Server) computeIPStats() []IPStat {
 		}
 
 		stat.SuccessCount++
-		latencySum[sample.IP] += sample.Latency
-		jitterSum[sample.IP] += sample.Jitter
+		latencySum[key] += sample.Latency
+		jitterSum[key] += sample.Jitter
 		if stat.BestLatency == 0 || sample.Latency < stat.BestLatency {
 			stat.BestLatency = sample.Latency
 		}
@@ -303,7 +328,7 @@ func (s *Server) computeIPStats() []IPStat {
 	missingGeo := make([]string, 0, len(statsMap))
 	for _, stat := range statsMap {
 		stat.Geo = s.geoLabel(stat.IP)
-		stat.Active = s.isIPActive(stat.IP)
+		stat.Active = s.isIPActiveInProfile(stat.ProfileID, stat.IP)
 		if stat.Active {
 			stat.Status = "active"
 		} else {
@@ -316,11 +341,11 @@ func (s *Server) computeIPStats() []IPStat {
 			stat.SuccessRate = float64(stat.SuccessCount) / float64(stat.SeenCount) * 100
 		}
 		if stat.SuccessCount > 0 {
-			stat.AvgLatency = latencySum[stat.IP] / float64(stat.SuccessCount)
-			stat.AvgJitter = jitterSum[stat.IP] / float64(stat.SuccessCount)
+			stat.AvgLatency = latencySum[sampleKey(stat.ProfileID, stat.Region, stat.IP)] / float64(stat.SuccessCount)
+			stat.AvgJitter = jitterSum[sampleKey(stat.ProfileID, stat.Region, stat.IP)] / float64(stat.SuccessCount)
 		}
 		if stat.SeenCount > 0 {
-			stat.AvgLossRate = lossRateSum[stat.IP] / float64(stat.SeenCount)
+			stat.AvgLossRate = lossRateSum[sampleKey(stat.ProfileID, stat.Region, stat.IP)] / float64(stat.SeenCount)
 		}
 		stats = append(stats, *stat)
 	}

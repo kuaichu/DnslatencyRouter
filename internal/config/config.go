@@ -17,8 +17,29 @@ type CloudflareConfig struct {
 	RecordID string `yaml:"record_id"`
 }
 
+type RegionRecord struct {
+	Label        string           `yaml:"label"`
+	CustomDomain string           `yaml:"custom_domain"`
+	RecordID     string           `yaml:"record_id"`
+	Cloudflare   CloudflareConfig `yaml:"cloudflare"`
+}
+
+type AirportProfile struct {
+	ID            string                  `yaml:"id"`
+	Name          string                  `yaml:"name"`
+	Slug          string                  `yaml:"slug"`
+	TargetDomain  string                  `yaml:"target_domain,omitempty"`
+	TargetDomains []string                `yaml:"target_domains"`
+	ProbeSource   string                  `yaml:"probe_source"`
+	Carrier       string                  `yaml:"carrier"`
+	EntryRecord   RegionRecord            `yaml:"entry_record"`
+	RegionRecords map[string]RegionRecord `yaml:"region_records,omitempty"`
+}
+
 type Config struct {
 	Cloudflare             CloudflareConfig `yaml:"cloudflare"`
+	BaseDomain             string           `yaml:"base_domain"`
+	AirportProfiles        []AirportProfile `yaml:"airport_profiles"`
 	TargetDomain           string           `yaml:"target_domain"`
 	CustomDomain           string           `yaml:"custom_domain"`
 	ProbeSource            string           `yaml:"probe_source"`
@@ -46,10 +67,10 @@ type Config struct {
 	WebPort                int              `yaml:"web_port"`
 
 	// derived
-	PingTimeout      time.Duration
-	CheckInterval    time.Duration
-	PingMinThreshold time.Duration
-	FailedOrphanTTL  time.Duration
+	PingTimeout      time.Duration `yaml:"-"`
+	CheckInterval    time.Duration `yaml:"-"`
+	PingMinThreshold time.Duration `yaml:"-"`
+	FailedOrphanTTL  time.Duration `yaml:"-"`
 }
 
 func Load(path string) (*Config, error) {
@@ -91,18 +112,25 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	// validate
+	if err := cfg.Normalize(); err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
+}
+
+func (cfg *Config) Normalize() error {
 	if cfg.Cloudflare.APIToken == "" {
-		return nil, fmt.Errorf("cloudflare.api_token is required")
+		return fmt.Errorf("cloudflare.api_token is required")
 	}
-	if cfg.Cloudflare.ZoneID == "" {
-		return nil, fmt.Errorf("cloudflare.zone_id is required")
+	if cfg.Cloudflare.ZoneID == "" && len(cfg.AirportProfiles) == 0 {
+		return fmt.Errorf("cloudflare.zone_id is required")
 	}
-	if cfg.Cloudflare.RecordID == "" {
-		return nil, fmt.Errorf("cloudflare.record_id is required")
+	if cfg.Cloudflare.RecordID == "" && len(cfg.AirportProfiles) == 0 {
+		return fmt.Errorf("cloudflare.record_id is required")
 	}
-	if cfg.TargetDomain == "" {
-		return nil, fmt.Errorf("target_domain is required")
+	if cfg.TargetDomain == "" && len(cfg.AirportProfiles) == 0 {
+		return fmt.Errorf("target_domain is required")
 	}
 	if cfg.PingAttempts < 1 {
 		cfg.PingAttempts = 1
@@ -114,30 +142,279 @@ func Load(path string) (*Config, error) {
 		cfg.FailedOrphanTTLHours = 0
 	}
 	if cfg.TimePenaltyStartHour < 0 || cfg.TimePenaltyStartHour > 23 {
-		return nil, fmt.Errorf("time_penalty_start_hour must be between 0 and 23")
+		return fmt.Errorf("time_penalty_start_hour must be between 0 and 23")
 	}
 	if cfg.TimePenaltyEndHour < 0 || cfg.TimePenaltyEndHour > 24 {
-		return nil, fmt.Errorf("time_penalty_end_hour must be between 0 and 24")
+		return fmt.Errorf("time_penalty_end_hour must be between 0 and 24")
 	}
 	if cfg.TimePenaltyScore < 0 {
-		return nil, fmt.Errorf("time_penalty_score cannot be negative")
+		return fmt.Errorf("time_penalty_score cannot be negative")
 	}
 	if cfg.FallbackBaselineIP != "" && net.ParseIP(strings.TrimSpace(cfg.FallbackBaselineIP)) == nil {
-		return nil, fmt.Errorf("fallback_baseline_ip must be a valid IP address")
+		return fmt.Errorf("fallback_baseline_ip must be a valid IP address")
 	}
 	if cfg.AlertWebhookURL != "" {
 		if _, err := url.ParseRequestURI(strings.TrimSpace(cfg.AlertWebhookURL)); err != nil {
-			return nil, fmt.Errorf("alert_webhook_url is invalid: %w", err)
+			return fmt.Errorf("alert_webhook_url is invalid: %w", err)
 		}
 	}
 	cfg.Carrier = NormalizeCarrier(cfg.Carrier)
+	if err := cfg.normalizeAirportProfiles(); err != nil {
+		return err
+	}
 
 	cfg.PingTimeout = time.Duration(cfg.PingTimeoutSec) * time.Second
 	cfg.CheckInterval = time.Duration(cfg.CheckIntervalSec) * time.Second
 	cfg.PingMinThreshold = time.Duration(cfg.PingMinThresholdMs * float64(time.Millisecond))
 	cfg.FailedOrphanTTL = time.Duration(cfg.FailedOrphanTTLHours) * time.Hour
 
-	return cfg, nil
+	return nil
+}
+
+func Save(path string, cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	if err := cfg.Normalize(); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func normalizeSlug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	prevDash := false
+	for _, r := range value {
+		ok := r >= 'a' && r <= 'z' || r >= '0' && r <= '9'
+		if ok {
+			b.WriteRune(r)
+			prevDash = false
+			continue
+		}
+		if (r == '-' || r == '_' || r == ' ') && !prevDash && b.Len() > 0 {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func NormalizeRegion(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "香港", "hongkong", "hong_kong":
+		return "hk"
+	case "马来西亚", "malaysia":
+		return "my"
+	case "新加坡", "singapore":
+		return "sg"
+	case "日本", "japan":
+		return "jp"
+	case "台湾", "taiwan":
+		return "tw"
+	case "澳门", "macao", "macau":
+		return "mo"
+	case "中国", "中国大陆", "大陆", "china", "cn":
+		return "cn"
+	case "美国", "usa", "united_states":
+		return "us"
+	default:
+		return normalizeSlug(value)
+	}
+}
+
+func RegionLabel(region string) string {
+	switch NormalizeRegion(region) {
+	case "hk":
+		return "香港"
+	case "my":
+		return "马来西亚"
+	case "sg":
+		return "新加坡"
+	case "jp":
+		return "日本"
+	case "tw":
+		return "台湾"
+	case "mo":
+		return "澳门"
+	case "cn":
+		return "中国大陆"
+	case "us":
+		return "美国"
+	case "default":
+		return "默认"
+	case "unknown":
+		return "未知地区"
+	default:
+		return strings.ToUpper(region)
+	}
+}
+
+func countryCodeToRegion(countryCode string) string {
+	switch strings.ToUpper(strings.TrimSpace(countryCode)) {
+	case "HK":
+		return "hk"
+	case "MY":
+		return "my"
+	case "SG":
+		return "sg"
+	case "JP":
+		return "jp"
+	case "TW":
+		return "tw"
+	case "MO":
+		return "mo"
+	case "CN":
+		return "cn"
+	case "US":
+		return "us"
+	default:
+		return "unknown"
+	}
+}
+
+func CountryCodeToRegion(countryCode string) string {
+	return countryCodeToRegion(countryCode)
+}
+
+func (c *Config) normalizeAirportProfiles() error {
+	for i := range c.AirportProfiles {
+		p := &c.AirportProfiles[i]
+		if p.ID == "" {
+			p.ID = p.Slug
+		}
+		p.ID = normalizeSlug(p.ID)
+		p.Slug = normalizeSlug(p.Slug)
+		if p.Slug == "" {
+			p.Slug = p.ID
+		}
+		if p.ID == "" {
+			p.ID = p.Slug
+		}
+		if p.ID == "" {
+			return fmt.Errorf("airport_profiles[%d].id or slug is required", i)
+		}
+		if p.Name == "" {
+			p.Name = p.ID
+		}
+		p.TargetDomains = normalizeDomainList(p.TargetDomains)
+		if p.TargetDomain != "" {
+			p.TargetDomain = strings.TrimSpace(p.TargetDomain)
+			p.TargetDomains = dedupeStrings(append([]string{p.TargetDomain}, p.TargetDomains...))
+		}
+		if len(p.TargetDomains) == 0 {
+			return fmt.Errorf("airport_profiles[%s].target_domain or target_domains is required", p.ID)
+		}
+		p.TargetDomain = p.TargetDomains[0]
+		if p.ProbeSource == "" {
+			p.ProbeSource = c.ProbeSource
+		}
+		if p.Carrier == "" {
+			p.Carrier = c.Carrier
+		}
+		p.Carrier = NormalizeCarrier(p.Carrier)
+		if p.EntryRecord.RecordID == "" {
+			p.EntryRecord.RecordID = p.EntryRecord.Cloudflare.RecordID
+		}
+		if p.EntryRecord.Label == "" {
+			p.EntryRecord.Label = "全局最快"
+		}
+		if p.EntryRecord.CustomDomain == "" && c.BaseDomain != "" {
+			p.EntryRecord.CustomDomain = fmt.Sprintf("%s-entry.%s", p.Slug, strings.TrimPrefix(c.BaseDomain, "."))
+		}
+		nextRecords := make(map[string]RegionRecord, len(p.RegionRecords))
+		for key, rec := range p.RegionRecords {
+			region := NormalizeRegion(key)
+			if region == "" {
+				return fmt.Errorf("airport_profiles[%s].region_records has empty region key", p.ID)
+			}
+			if rec.Label == "" {
+				rec.Label = RegionLabel(region)
+			}
+			if rec.CustomDomain == "" && c.BaseDomain != "" {
+				rec.CustomDomain = fmt.Sprintf("%s-%s.%s", p.Slug, region, strings.TrimPrefix(c.BaseDomain, "."))
+			}
+			if rec.RecordID == "" {
+				rec.RecordID = rec.Cloudflare.RecordID
+			}
+			if rec.RecordID == "" && rec.CustomDomain == "" {
+				return fmt.Errorf("airport_profiles[%s].region_records[%s] requires record_id or custom_domain", p.ID, region)
+			}
+			nextRecords[region] = rec
+		}
+		if len(nextRecords) > 0 {
+			p.RegionRecords = nextRecords
+		} else {
+			p.RegionRecords = nil
+		}
+	}
+	return nil
+}
+
+func normalizeDomainList(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return dedupeStrings(out)
+}
+
+func dedupeStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		key := strings.ToLower(strings.TrimSpace(value))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, strings.TrimSpace(value))
+	}
+	return out
+}
+
+func (c *Config) HasAirportProfiles() bool {
+	return len(c.AirportProfiles) > 0
+}
+
+func (c *Config) LegacyProfile() AirportProfile {
+	slug := "default"
+	if c.CustomDomain != "" {
+		host := strings.Split(c.CustomDomain, ".")[0]
+		if parts := strings.Split(host, "-"); len(parts) > 0 && parts[0] != "" {
+			slug = normalizeSlug(parts[0])
+		}
+	}
+	if slug == "" {
+		slug = "default"
+	}
+	return AirportProfile{
+		ID:            slug,
+		Name:          slug,
+		Slug:          slug,
+		TargetDomain:  c.TargetDomain,
+		TargetDomains: []string{c.TargetDomain},
+		ProbeSource:   c.ProbeSource,
+		Carrier:       c.Carrier,
+		RegionRecords: map[string]RegionRecord{
+			"default": {
+				Label:        "默认",
+				CustomDomain: c.CustomDomain,
+				RecordID:     c.Cloudflare.RecordID,
+			},
+		},
+	}
 }
 
 func (c *Config) TimePenaltyKeywords() []string {
@@ -220,11 +497,26 @@ func (c *Config) EffectiveCarrier() string {
 	return carrier
 }
 
+func EffectiveCarrierFor(carrier, probeSource string) string {
+	normalized := NormalizeCarrier(carrier)
+	if normalized == "auto" {
+		return InferCarrier(probeSource)
+	}
+	return normalized
+}
+
 func (c *Config) EffectiveCarrierLabel() string {
 	if NormalizeCarrier(c.Carrier) == "auto" {
 		return CarrierLabel(c.EffectiveCarrier()) + "（自动）"
 	}
 	return CarrierLabel(c.EffectiveCarrier())
+}
+
+func EffectiveCarrierLabelFor(carrier, probeSource string) string {
+	if NormalizeCarrier(carrier) == "auto" {
+		return CarrierLabel(EffectiveCarrierFor(carrier, probeSource)) + "（自动）"
+	}
+	return CarrierLabel(EffectiveCarrierFor(carrier, probeSource))
 }
 
 func dedupeServers(primary, fallback []string) []string {
@@ -246,8 +538,12 @@ func dedupeServers(primary, fallback []string) []string {
 
 // EffectiveDNSServers chooses a resolver pool that matches the carrier strategy.
 func (c *Config) EffectiveDNSServers() []string {
+	return c.EffectiveDNSServersFor(c.Carrier, c.ProbeSource)
+}
+
+func (c *Config) EffectiveDNSServersFor(carrier, probeSource string) []string {
 	fallback := c.DNSServers
-	switch c.EffectiveCarrier() {
+	switch EffectiveCarrierFor(carrier, probeSource) {
 	case "unicom":
 		return dedupeServers([]string{
 			"123.125.81.6",  // China Unicom Beijing

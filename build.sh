@@ -8,7 +8,8 @@ echo "=== Building dns-latency-router ==="
 
 # Linux (amd64) — for PM2 deployment
 echo "[1/2] Building for linux/amd64 ..."
-GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dns-latency-router ./main.go
+# Use conservative Linux codegen for deployment stability on older VPS CPUs / kernels.
+GOOS=linux GOARCH=amd64 go build -gcflags="all=-N -l" -o dns-latency-router ./main.go
 echo "  -> dns-latency-router"
 
 # Windows (amd64)

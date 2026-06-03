@@ -31,8 +31,7 @@ dns-latency-router/
     ├── cloudflare/cloudflare.go      # Cloudflare API client (GET/PATCH DNS records)
     └── web/
         ├── server.go                 # HTTP server, SSE, config API, embed template
-        ├── dashboard.html            # Web UI template (embedded via go:embed)
-        └── dashboard.html.bak        # UI backup (before next rewrite)
+        └── dashboard.html            # Web UI template (embedded via go:embed)
 ```
 
 ---

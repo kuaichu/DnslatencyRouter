@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A Go service that resolves a target domain from carrier-aware DNS pools, probes every discovered IP, scores them by latency/jitter/loss, and updates a Cloudflare DNS A record only when a candidate is meaningfully better and stable long enough. It includes a self-contained Web dashboard for status, history, logs, IP analytics, and live config editing.
+A Go service that resolves one or more airport entry domains from carrier-aware DNS pools, probes every discovered IP, scores them by latency/jitter/loss, and updates Cloudflare DNS A records only when candidates are meaningfully better and stable long enough. It supports both legacy single-entry routing and multi-airport / multi-region routing. It includes a self-contained Web dashboard for status, history, logs, IP analytics, live config editing, and local SVG flag display.
 
 **Executable**: `dns-latency-router` / `dns-latency-router.exe`  
 **Language**: Go 1.21  
@@ -27,7 +27,9 @@ dns-latency-router/
 │   ├── config/
 │   │   └── config.go
 │   └── web/
-│       ├── dashboard_v2.html
+│       ├── assets/
+│       │   └── flags/
+│       ├── dashboard.html
 │       ├── persistence.go
 │       └── server.go
 └── data/
@@ -90,7 +92,7 @@ Time-based weighting can penalize specific ISP / IDC labels during configured lo
 
 ## Current Web UI
 
-The dashboard is embedded from `internal/web/dashboard_v2.html`. There is no separate frontend build step.
+The dashboard is embedded from `internal/web/dashboard.html`. There is no separate frontend build step.
 
 Main modules:
 
@@ -108,8 +110,10 @@ Main modules:
   - summaries
   - collapse/expand
   - auto-follow toggle
-- Settings modal with 3 tabs:
+- Region routing panel with global summary and region cards, using embedded local SVG flags from `internal/web/assets/flags`
+- Settings modal with 4 tabs:
   - basic
+  - airport entries
   - probe
   - routing
     - includes time-window penalty controls for start hour, end hour, penalty score, and provider keywords
@@ -172,6 +176,15 @@ Implemented in `internal/web/server.go` and `persistence.go`.
 - `time_penalty_score`
 - `time_penalty_org_keywords`
 
+`/api/airport-profiles` supports live updates for multi-airport routing:
+
+- `base_domain`
+- `airport_profiles[].name`
+- `airport_profiles[].slug`
+- `airport_profiles[].target_domains`
+- `airport_profiles[].probe_source`
+- `airport_profiles[].carrier`
+
 Changes are:
 
 1. Written back to `config.yaml`
@@ -197,6 +210,7 @@ Typical deployment flow:
 
 ## Common Pitfalls
 
-- This project no longer uses `dashboard.html`; the live template is `dashboard_v2.html`
+- The live dashboard template is `dashboard.html`
+- Static dashboard assets under `internal/web/assets/` are embedded by Go; keep flag SVGs local unless an external CDN is explicitly requested
 - The frontend currently polls JSON APIs; browser "always loading" issues from SSE are no longer the main UI path
 - Not every change needs Cloudflare API verification, but anything touching modern network behavior or deployment should be verified carefully

@@ -12,8 +12,11 @@
 - 每轮可多次探测同一 IP，计算平均延迟、抖动、丢包率与综合分
 - 不是看到更低延迟就立即切换，而是带有 `阈值 + 稳定时长` 的防抖策略
 - 支持按本地时间窗口对指定 IDC / ISP 动态加权，避免深夜抖动节点误切换
+- 支持多机场入口：每个机场可配置独立入口域名、缩写、探测源与运营商策略
+- 支持按 IP 归属地拆分地区记录，例如 `sntp-hk.example.com`、`sntp-my.example.com`
 - Cloudflare API 支持走代理
 - Web 仪表盘支持在线修改主要配置并即时生效
+- Web 仪表盘内置全球 SVG 国旗资源，地区卡片不依赖系统 Emoji 或外部 CDN
 - 日志、检测历史、IP 样本会持久化保存最近 7 天
 - 支持 IP 生命周期管理：游离 IP 不会立刻删除，而是降级展示并在窗口期后自动淘汰
 
@@ -158,8 +161,11 @@
   - 支持自动跟随 / 锁定查看历史
   - 前端会过滤终端噪声，比如 `press Ctrl+C`、`next check in`、`received interrupt`
 - **管理设置**
-  - 分成三个标签页：
+  - 单机场模式下可编辑基础域名、探测参数和路由算法
+  - 多机场模式下以“机场入口”为主，按机场配置入口域名、缩写、探测源和运营商策略
+  - 分成四个标签页：
     - 基础设置
+    - 机场入口
     - 探测配置
     - 路由算法
   - 保存后会同时：
@@ -176,7 +182,32 @@
 - 主色为绿色青蓝系，表示“连通、稳定、在线”
 - 重要信息前置，次级信息做低侵略度弱化
 - 日志区做成嵌入式终端风格，便于长时间盯盘
+- 地区解析卡片使用内置 SVG 国旗、地区名和弱化缩写形成视觉锚点
+- 全局最快记录作为通栏汇总卡展示，子区域卡片只保留精简候选数，生命周期信息通过悬浮提示查看
 - 移动端单列布局，核心卡片和延迟圆环可正常阅读
+
+### 内置国旗资源
+
+地区卡片使用本地 SVG 国旗，不依赖系统 Emoji 渲染，也不访问外部 CDN。资源来自 `flag-icons@7.5.0` 的 `flags/4x3`，按 MIT License 使用，授权文件保存在：
+
+```text
+internal/web/assets/flags/LICENSE.flag-icons
+```
+
+这些 SVG 会通过 Go `embed` 打进最终二进制，并由本地静态路径提供：
+
+```text
+/assets/flags/cn.svg
+/assets/flags/hk.svg
+/assets/flags/my.svg
+/assets/flags/jp.svg
+```
+
+前端会根据地区代码自动选择对应 SVG。已做兼容：
+
+- `entry` → `un`
+- `uk` → `gb`
+- `mac` → `mo`
 
 ## 数据保留与生命周期
 
@@ -242,6 +273,71 @@ dns_servers:
   - 8.8.8.8
 ```
 
+### 多机场 / 多地区入口
+
+如果要让不同机场、不同地区分别更新到独立子域名，可以保留全局 Cloudflare token 和 `zone_id`，然后配置 `airport_profiles`。当某个地区没有显式写 `custom_domain` 时，会按 `{slug}-{region}.{base_domain}` 自动生成。
+
+```yaml
+cloudflare:
+  api_token: "your-api-token"
+  zone_id: "ziher-zone-id"
+
+base_domain: "ziher.eu.org"
+
+airport_profiles:
+  - id: "sntp"
+    name: "守候网络"
+    slug: "sntp"
+    target_domains:
+      - "entry-1.sntp.example"
+      - "entry-2.sntp.example"
+    probe_source: "宁波联通"
+    carrier: "auto"
+    entry_record:
+      label: "全局最快"
+      record_id: "cloudflare-record-id-for-sntp-entry"
+    region_records:
+      hk:
+        label: "香港"
+        record_id: "cloudflare-record-id-for-sntp-hk"
+      my:
+        label: "马来西亚"
+        record_id: "cloudflare-record-id-for-sntp-my"
+
+  - id: "jjz"
+    name: "搅局者"
+    slug: "jjz"
+    target_domains:
+      - "entry.jjz.example"
+    entry_record:
+      record_id: "cloudflare-record-id-for-jjz-entry"
+    region_records:
+      hk:
+        label: "香港"
+        record_id: "cloudflare-record-id-for-jjz-hk"
+```
+
+上面的配置会自动对应这些域名：
+
+- `sntp-hk.ziher.eu.org`
+- `sntp-my.ziher.eu.org`
+- `sntp-entry.ziher.eu.org`
+- `jjz-entry.ziher.eu.org`
+- `jjz-hk.ziher.eu.org`
+
+每轮检测会先解析机场入口域名；如果一个机场配置了多个 `target_domains`，会把这些域名解析出的 IP 合并去重后统一探测。随后再按 IP 归属地分组；例如解析出 3 个香港 IP 和 1 个马来西亚 IP 时，系统会在香港组内选最优 IP 更新 `sntp-hk.ziher.eu.org`，马来西亚组只有一个健康 IP 时则直接更新 `sntp-my.ziher.eu.org`。`entry_record` 会从该机场解析出的全部健康 IP 里选综合最优，更新到 `sntp-entry.ziher.eu.org`。每个机场和地区都有独立的稳定窗口，互不影响。
+
+当前内置地区代码包括：
+
+- `hk`: 香港
+- `my`: 马来西亚
+- `sg`: 新加坡
+- `jp`: 日本
+- `tw`: 台湾
+- `mo`: 澳门
+- `cn`: 中国大陆
+- `us`: 美国
+
 ### 字段说明
 
 | 字段 | 说明 |
@@ -276,6 +372,13 @@ dns_servers:
   - `probe_source`
   - `carrier`
   - `check_interval`
+- **机场入口**
+  - `base_domain`
+  - `airport_profiles[].name`
+  - `airport_profiles[].slug`
+  - `airport_profiles[].target_domains`
+  - `airport_profiles[].probe_source`
+  - `airport_profiles[].carrier`
 - **探测配置**
   - `ping_mode`
   - `ping_port`
@@ -342,6 +445,15 @@ pm2 delete dns-latency-router
 ```bash
 ./dns-latency-router /path/to/config.yaml
 ```
+
+### Release 构建产物
+
+正式 Release 通常提供两个 amd64 产物：
+
+- `dns-latency-router-windows-amd64.exe`
+- `dns-latency-router-linux-amd64`
+
+两者都包含嵌入式 Web 仪表盘和本地 SVG 国旗资源，不需要额外拷贝 `internal/web/assets`。
 
 ## 代理客户端配置示例
 

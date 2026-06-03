@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -31,9 +32,9 @@ type dnsRecord struct {
 }
 
 type apiResponse struct {
-	Success  bool            `json:"success"`
-	Errors   []apiError      `json:"errors"`
-	Result   json.RawMessage `json:"result"`
+	Success bool            `json:"success"`
+	Errors  []apiError      `json:"errors"`
+	Result  json.RawMessage `json:"result"`
 }
 
 type apiError struct {
@@ -99,8 +100,22 @@ func (c *Client) do(method, url string, body io.Reader) (*apiResponse, error) {
 	return &apiResp, nil
 }
 
+func (c *Client) doRaw(method, url string, body io.Reader) (json.RawMessage, error) {
+	apiResp, err := c.do(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	if !apiResp.Success {
+		return nil, fmt.Errorf("%s %s: %s", method, url, formatErrors(apiResp.Errors))
+	}
+	return apiResp.Result, nil
+}
+
 // GetRecord fetches the current DNS record.
 func (c *Client) GetRecord() (*dnsRecord, error) {
+	if strings.TrimSpace(c.recordID) == "" {
+		return nil, fmt.Errorf("record_id is empty")
+	}
 	url := fmt.Sprintf("%s/zones/%s/dns_records/%s", baseURL, c.zoneID, c.recordID)
 	apiResp, err := c.do("GET", url, nil)
 	if err != nil {
@@ -117,9 +132,85 @@ func (c *Client) GetRecord() (*dnsRecord, error) {
 	return &rec, nil
 }
 
+func (c *Client) FindARecordByName(name string) (*dnsRecord, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("record name is empty")
+	}
+	u := fmt.Sprintf("%s/zones/%s/dns_records?type=A&name=%s&per_page=1", baseURL, c.zoneID, url.QueryEscape(name))
+	result, err := c.doRaw("GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("find A record %s: %w", name, err)
+	}
+	var records []dnsRecord
+	if err := json.Unmarshal(result, &records); err != nil {
+		return nil, fmt.Errorf("parse record search: %w", err)
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+	return &records[0], nil
+}
+
+func (c *Client) CreateARecord(name, ip string) (*dnsRecord, error) {
+	name = strings.TrimSpace(name)
+	ip = strings.TrimSpace(ip)
+	if name == "" {
+		return nil, fmt.Errorf("record name is empty")
+	}
+	if ip == "" {
+		return nil, fmt.Errorf("record ip is empty")
+	}
+	body := map[string]interface{}{
+		"type":    "A",
+		"name":    name,
+		"content": ip,
+		"ttl":     1,
+		"proxied": false,
+	}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal create body: %w", err)
+	}
+	u := fmt.Sprintf("%s/zones/%s/dns_records", baseURL, c.zoneID)
+	result, err := c.doRaw("POST", u, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("create A record %s: %w", name, err)
+	}
+	var rec dnsRecord
+	if err := json.Unmarshal(result, &rec); err != nil {
+		return nil, fmt.Errorf("parse created record: %w", err)
+	}
+	c.recordID = rec.ID
+	return &rec, nil
+}
+
+func (c *Client) GetRecordByName(name string) (*dnsRecord, error) {
+	if strings.TrimSpace(c.recordID) != "" {
+		return c.GetRecord()
+	}
+	rec, err := c.FindARecordByName(name)
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil {
+		return nil, fmt.Errorf("A record %s does not exist", name)
+	}
+	c.recordID = rec.ID
+	return rec, nil
+}
+
 // CurrentIP returns the current record content.
 func (c *Client) CurrentIP() (string, error) {
 	rec, err := c.GetRecord()
+	if err != nil {
+		return "", err
+	}
+	return rec.Content, nil
+}
+
+func (c *Client) CurrentIPByName(name string) (string, error) {
+	rec, err := c.GetRecordByName(name)
 	if err != nil {
 		return "", err
 	}
@@ -160,6 +251,38 @@ func (c *Client) UpdateRecord(ip string) error {
 		return fmt.Errorf("update record: %s", formatErrors(apiResp.Errors))
 	}
 
+	return nil
+}
+
+func (c *Client) UpdateRecordByName(name, ip string) error {
+	rec, err := c.GetRecordByName(name)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			_, createErr := c.CreateARecord(name, ip)
+			return createErr
+		}
+		return fmt.Errorf("get record before update: %w", err)
+	}
+
+	if rec.Content == ip {
+		return nil
+	}
+
+	body := map[string]interface{}{
+		"type":    rec.Type,
+		"name":    rec.Name,
+		"content": ip,
+		"ttl":     rec.TTL,
+		"proxied": rec.Proxied,
+	}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal update body: %w", err)
+	}
+	u := fmt.Sprintf("%s/zones/%s/dns_records/%s", baseURL, c.zoneID, rec.ID)
+	if _, err := c.doRaw("PATCH", u, bytes.NewReader(jsonBody)); err != nil {
+		return fmt.Errorf("update record %s: %w", name, err)
+	}
 	return nil
 }
 

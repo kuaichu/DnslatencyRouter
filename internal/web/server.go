@@ -20,40 +20,68 @@ import (
 	"dns-latency-router/internal/config"
 )
 
-//go:embed dashboard_v2.html
+//go:embed dashboard.html assets/flags/*
 var templateFS embed.FS
 
 // Status holds the current state exposed via API/SSE.
 type Status struct {
-	TargetDomain      string  `json:"targetDomain"`
-	CustomDomain      string  `json:"customDomain"`
-	ProbeSource       string  `json:"probeSource"`
-	Carrier           string  `json:"carrier"`
-	CarrierLabel      string  `json:"carrierLabel"`
-	CurrentIP         string  `json:"currentIP"`
-	Latency           float64 `json:"latency"`   // ms, 0 = unknown
-	LastCheck         string  `json:"lastCheck"` // RFC3339
-	NextCheck         string  `json:"nextCheck"` // RFC3339
-	IsRunning         bool    `json:"isRunning"`
-	DiscoveredCount   int     `json:"discoveredCount"`
-	CheckIntervalSec  int     `json:"checkIntervalSec"`
-	PingMode          string  `json:"pingMode"`
-	PingPort          int     `json:"pingPort"`
-	PingAttempts      int     `json:"pingAttempts"`
-	LatencyWeight     float64 `json:"latencyWeight"`
-	JitterWeight      float64 `json:"jitterWeight"`
-	LossWeight        float64 `json:"lossWeight"`
-	SwitchImprovement float64 `json:"switchImprovement"`
-	SwitchStableSec   int     `json:"switchStableSec"`
+	TargetDomain      string          `json:"targetDomain"`
+	CustomDomain      string          `json:"customDomain"`
+	ProbeSource       string          `json:"probeSource"`
+	Carrier           string          `json:"carrier"`
+	CarrierLabel      string          `json:"carrierLabel"`
+	CurrentIP         string          `json:"currentIP"`
+	Latency           float64         `json:"latency"`   // ms, 0 = unknown
+	LastCheck         string          `json:"lastCheck"` // RFC3339
+	NextCheck         string          `json:"nextCheck"` // RFC3339
+	IsRunning         bool            `json:"isRunning"`
+	DiscoveredCount   int             `json:"discoveredCount"`
+	CheckIntervalSec  int             `json:"checkIntervalSec"`
+	PingMode          string          `json:"pingMode"`
+	PingPort          int             `json:"pingPort"`
+	PingAttempts      int             `json:"pingAttempts"`
+	LatencyWeight     float64         `json:"latencyWeight"`
+	JitterWeight      float64         `json:"jitterWeight"`
+	LossWeight        float64         `json:"lossWeight"`
+	SwitchImprovement float64         `json:"switchImprovement"`
+	SwitchStableSec   int             `json:"switchStableSec"`
+	Profiles          []ProfileStatus `json:"profiles,omitempty"`
+}
+
+type ProfileStatus struct {
+	ID              string         `json:"id"`
+	Name            string         `json:"name"`
+	Slug            string         `json:"slug"`
+	TargetDomain    string         `json:"targetDomain"`
+	TargetDomains   []string       `json:"targetDomains,omitempty"`
+	ProbeSource     string         `json:"probeSource"`
+	Carrier         string         `json:"carrier"`
+	CarrierLabel    string         `json:"carrierLabel"`
+	DiscoveredCount int            `json:"discoveredCount"`
+	Regions         []RegionStatus `json:"regions"`
+}
+
+type RegionStatus struct {
+	Region         string  `json:"region"`
+	Label          string  `json:"label"`
+	CustomDomain   string  `json:"customDomain"`
+	CurrentIP      string  `json:"currentIP"`
+	BestIP         string  `json:"bestIP"`
+	Latency        float64 `json:"latency"`
+	Score          float64 `json:"score"`
+	CandidateCount int     `json:"candidateCount"`
+	Status         string  `json:"status"`
 }
 
 // CheckRecord is one completed check cycle.
 type CheckRecord struct {
-	Time    time.Time `json:"time"`
-	IP      string    `json:"ip"`
-	Latency float64   `json:"latency"` // ms, 0 if failed
-	Success bool      `json:"success"`
-	Error   string    `json:"error,omitempty"`
+	Time      time.Time `json:"time"`
+	ProfileID string    `json:"profileId,omitempty"`
+	Region    string    `json:"region,omitempty"`
+	IP        string    `json:"ip"`
+	Latency   float64   `json:"latency"` // ms, 0 if failed
+	Success   bool      `json:"success"`
+	Error     string    `json:"error,omitempty"`
 }
 
 // Server is the web dashboard HTTP server.
@@ -71,13 +99,15 @@ type Server struct {
 	readyCh              chan struct{}
 	cfgPath              string                                                                                                                                                                                                                                                                                                                                                                               // for persisting config changes
 	onConfig             func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string) // callback to notify main loop
-	triggerCh            chan<- struct{}                                                                                                                                                                                                                                                                                                                                                                      // signal main loop to run a check immediately
+	onProfiles           func(*config.Config)
+	triggerCh            chan<- struct{} // signal main loop to run a check immediately
 	logBuf               []LogEntry
 	logBufMu             sync.Mutex
 	logsPath             string
 	historyPath          string
 	samplesPath          string
 	activeIPs            map[string]bool
+	activeIPsByProfile   map[string]map[string]bool
 	activeIPsMu          sync.RWMutex
 	geoCache             map[string]GeoInfo
 	geoPending           map[string]bool
@@ -99,11 +129,12 @@ type sseEvent struct {
 }
 
 type GeoInfo struct {
-	IP      string
-	Label   string
-	Country string
-	City    string
-	ISP     string
+	IP          string
+	Label       string
+	CountryCode string
+	Country     string
+	City        string
+	ISP         string
 }
 
 // New creates a web server.
@@ -111,16 +142,17 @@ type GeoInfo struct {
 // onConfig is called when the user updates target_domain or custom_domain via the web UI.
 func New(port int, cfgPath string, triggerCh chan<- struct{}, onConfig func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string)) *Server {
 	s := &Server{
-		port:       port,
-		sseClients: make(map[string]chan sseEvent),
-		readyCh:    make(chan struct{}),
-		cfgPath:    cfgPath,
-		onConfig:   onConfig,
-		triggerCh:  triggerCh,
-		activeIPs:  make(map[string]bool),
-		geoCache:   make(map[string]GeoInfo),
-		geoPending: make(map[string]bool),
-		geoClient:  &http.Client{Timeout: 4 * time.Second},
+		port:               port,
+		sseClients:         make(map[string]chan sseEvent),
+		readyCh:            make(chan struct{}),
+		cfgPath:            cfgPath,
+		onConfig:           onConfig,
+		triggerCh:          triggerCh,
+		activeIPs:          make(map[string]bool),
+		activeIPsByProfile: make(map[string]map[string]bool),
+		geoCache:           make(map[string]GeoInfo),
+		geoPending:         make(map[string]bool),
+		geoClient:          &http.Client{Timeout: 4 * time.Second},
 	}
 	stateDir := filepath.Join(filepath.Dir(cfgPath), "data")
 	s.logsPath = filepath.Join(stateDir, "runtime-logs.jsonl")
@@ -135,6 +167,7 @@ func New(port int, cfgPath string, triggerCh chan<- struct{}, onConfig func(targ
 // Start begins the HTTP server in a goroutine. Returns immediately.
 func (s *Server) Start() {
 	mux := http.NewServeMux()
+	mux.Handle("/assets/", http.FileServer(http.FS(templateFS)))
 	mux.HandleFunc("/", s.handleDashboard)
 	mux.HandleFunc("/api/status", s.handleAPIStatus)
 	mux.HandleFunc("/api/history", s.handleAPIHistory)
@@ -142,6 +175,7 @@ func (s *Server) Start() {
 	mux.HandleFunc("/api/ip-samples", s.handleAPIIPSamples)
 	mux.HandleFunc("/api/logs", s.handleAPILogs)
 	mux.HandleFunc("/api/config", s.handleAPIConfig)
+	mux.HandleFunc("/api/airport-profiles", s.handleAPIAirportProfiles)
 	mux.HandleFunc("/api/check", s.handleCheck)
 	mux.HandleFunc("/api/events", s.handleSSE)
 
@@ -186,6 +220,12 @@ func (s *Server) SetTimePenaltyConfig(startHour, endHour int, score float64, key
 	s.timePenaltyEndHour = endHour
 	s.timePenaltyScore = score
 	s.timePenaltyKeywords = strings.TrimSpace(keywords)
+	s.runtimeCfgMu.Unlock()
+}
+
+func (s *Server) SetProfilesCallback(cb func(*config.Config)) {
+	s.runtimeCfgMu.Lock()
+	s.onProfiles = cb
 	s.runtimeCfgMu.Unlock()
 }
 
@@ -245,12 +285,12 @@ func (s *Server) AddSamples(samples []IPSample) {
 	s.samplesMu.Lock()
 	s.samples = append(s.samples, samples...)
 	s.samples = pruneSamples(s.samples)
-	pruned := s.pruneFailedOrphanSamplesLocked()
+	pruned := s.pruneInactiveOrphanSamplesLocked()
 	s.samplesMu.Unlock()
 	s.persistSamples()
 	s.ensureGeoForIPs(sampleIPs(samples))
 	if pruned {
-		log.Printf("[gc] runtime sample store compacted after failed-orphan pruning")
+		log.Printf("[gc] runtime sample store compacted after orphan inactivity pruning")
 	}
 	s.broadcast("ipstats", mustJSON(s.computeIPStats()))
 }
@@ -293,6 +333,10 @@ func isPublicIPv4(ip string) bool {
 }
 
 func (s *Server) UpdateResolvedIPs(ips []string) {
+	s.UpdateResolvedIPsForProfile("", ips)
+}
+
+func (s *Server) UpdateResolvedIPsForProfile(profileID string, ips []string) {
 	next := make(map[string]bool, len(ips))
 	for _, ip := range ips {
 		if ip == "" {
@@ -301,7 +345,18 @@ func (s *Server) UpdateResolvedIPs(ips []string) {
 		next[ip] = true
 	}
 	s.activeIPsMu.Lock()
-	s.activeIPs = next
+	if profileID == "" {
+		s.activeIPs = next
+	} else {
+		s.activeIPsByProfile[profileID] = next
+		merged := make(map[string]bool)
+		for _, group := range s.activeIPsByProfile {
+			for ip := range group {
+				merged[ip] = true
+			}
+		}
+		s.activeIPs = merged
+	}
 	s.activeIPsMu.Unlock()
 }
 
@@ -310,6 +365,41 @@ func (s *Server) isIPActive(ip string) bool {
 	active := s.activeIPs[ip]
 	s.activeIPsMu.RUnlock()
 	return active
+}
+
+func (s *Server) isIPActiveInProfile(profileID, ip string) bool {
+	if profileID == "" {
+		return s.isIPActive(ip)
+	}
+	s.activeIPsMu.RLock()
+	defer s.activeIPsMu.RUnlock()
+	group := s.activeIPsByProfile[profileID]
+	if group == nil {
+		return s.activeIPs[ip]
+	}
+	return group[ip]
+}
+
+func (s *Server) GeoForIP(ip string) GeoInfo {
+	if !isPublicIPv4(ip) {
+		return GeoInfo{IP: ip}
+	}
+	s.geoMu.RLock()
+	info, ok := s.geoCache[ip]
+	pending := s.geoPending[ip]
+	s.geoMu.RUnlock()
+	if ok {
+		return info
+	}
+	if pending {
+		return GeoInfo{IP: ip}
+	}
+	info = s.fetchGeoInfo(ip)
+	s.geoMu.Lock()
+	s.geoCache[ip] = info
+	delete(s.geoPending, ip)
+	s.geoMu.Unlock()
+	return info
 }
 
 func (s *Server) ensureGeoForSamples() {
@@ -378,7 +468,7 @@ func compactGeoLabel(country, city, isp string) string {
 
 func (s *Server) fetchGeoInfo(ip string) GeoInfo {
 	info := GeoInfo{IP: ip}
-	url := fmt.Sprintf("http://ip-api.com/json/%s?lang=zh-CN&fields=status,country,city,isp", ip)
+	url := fmt.Sprintf("http://ip-api.com/json/%s?lang=zh-CN&fields=status,countryCode,country,city,isp", ip)
 	resp, err := s.geoClient.Get(url)
 	if err != nil {
 		return info
@@ -389,10 +479,11 @@ func (s *Server) fetchGeoInfo(ip string) GeoInfo {
 	}
 
 	var payload struct {
-		Status  string `json:"status"`
-		Country string `json:"country"`
-		City    string `json:"city"`
-		ISP     string `json:"isp"`
+		Status      string `json:"status"`
+		CountryCode string `json:"countryCode"`
+		Country     string `json:"country"`
+		City        string `json:"city"`
+		ISP         string `json:"isp"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return info
@@ -401,6 +492,7 @@ func (s *Server) fetchGeoInfo(ip string) GeoInfo {
 		return info
 	}
 
+	info.CountryCode = strings.TrimSpace(payload.CountryCode)
 	info.Country = strings.TrimSpace(payload.Country)
 	info.City = strings.TrimSpace(payload.City)
 	info.ISP = strings.TrimSpace(payload.ISP)
@@ -471,12 +563,14 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	tmpl, err := template.ParseFS(templateFS, "dashboard_v2.html")
+	tmpl, err := template.ParseFS(templateFS, "dashboard.html")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
 	tmpl.Execute(w, nil)
 }
 
@@ -516,6 +610,190 @@ func (s *Server) handleAPILogs(w http.ResponseWriter, r *http.Request) {
 		logs = logs[len(logs)-maxLogs:]
 	}
 	writeJSON(w, logs)
+}
+
+type airportProfilesResponse struct {
+	BaseDomain string                  `json:"base_domain"`
+	Profiles   []airportProfilePayload `json:"airport_profiles"`
+}
+
+type airportProfilesRequest struct {
+	BaseDomain *string                 `json:"base_domain"`
+	Profiles   []airportProfilePayload `json:"airport_profiles"`
+}
+
+type airportProfilePayload struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Slug          string   `json:"slug"`
+	TargetDomains []string `json:"target_domains"`
+	ProbeSource   string   `json:"probe_source"`
+	Carrier       string   `json:"carrier"`
+}
+
+func airportProfileToPayload(profile config.AirportProfile) airportProfilePayload {
+	return airportProfilePayload{
+		ID:            profile.ID,
+		Name:          profile.Name,
+		Slug:          profile.Slug,
+		TargetDomains: append([]string(nil), profile.TargetDomains...),
+		ProbeSource:   profile.ProbeSource,
+		Carrier:       profile.Carrier,
+	}
+}
+
+func profileLookup(profiles []config.AirportProfile) map[string]config.AirportProfile {
+	out := make(map[string]config.AirportProfile, len(profiles)*2)
+	for _, profile := range profiles {
+		if profile.ID != "" {
+			out[strings.ToLower(profile.ID)] = profile
+		}
+		if profile.Slug != "" {
+			out[strings.ToLower(profile.Slug)] = profile
+		}
+	}
+	return out
+}
+
+func (s *Server) handleAPIAirportProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" {
+		cfg, err := config.Load(s.cfgPath)
+		if err != nil {
+			writeJSON(w, map[string]string{"error": "load config: " + err.Error()})
+			return
+		}
+		profiles := make([]airportProfilePayload, 0, len(cfg.AirportProfiles))
+		for _, profile := range cfg.AirportProfiles {
+			profiles = append(profiles, airportProfileToPayload(profile))
+		}
+		writeJSON(w, airportProfilesResponse{BaseDomain: cfg.BaseDomain, Profiles: profiles})
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body airportProfilesRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+
+	current, err := config.Load(s.cfgPath)
+	if err != nil {
+		writeJSON(w, map[string]string{"error": "load config: " + err.Error()})
+		return
+	}
+
+	next := *current
+	if body.BaseDomain != nil {
+		next.BaseDomain = strings.TrimSpace(*body.BaseDomain)
+	}
+	existing := profileLookup(current.AirportProfiles)
+	nextProfiles := make([]config.AirportProfile, 0, len(body.Profiles))
+	for i, incoming := range body.Profiles {
+		id := strings.TrimSpace(incoming.ID)
+		slug := strings.TrimSpace(incoming.Slug)
+		name := strings.TrimSpace(incoming.Name)
+		if slug == "" {
+			slug = id
+		}
+		key := strings.ToLower(id)
+		if key == "" {
+			key = strings.ToLower(slug)
+		}
+		prev := existing[key]
+		if prev.ID == "" && slug != "" {
+			prev = existing[strings.ToLower(slug)]
+		}
+		entry := prev.EntryRecord
+		if entry.Label == "" {
+			entry.Label = "全局最快"
+		}
+		profile := config.AirportProfile{
+			ID:            id,
+			Name:          name,
+			Slug:          slug,
+			TargetDomains: incoming.TargetDomains,
+			ProbeSource:   strings.TrimSpace(incoming.ProbeSource),
+			Carrier:       config.NormalizeCarrier(incoming.Carrier),
+			EntryRecord:   entry,
+		}
+		if len(profile.TargetDomains) == 0 {
+			writeJSON(w, map[string]string{"error": fmt.Sprintf("airport_profiles[%d] 至少需要一个入口域名", i+1)})
+			return
+		}
+		nextProfiles = append(nextProfiles, profile)
+	}
+	if len(nextProfiles) == 0 {
+		writeJSON(w, map[string]string{"error": "至少保留一个机场配置"})
+		return
+	}
+	next.AirportProfiles = nextProfiles
+	if err := next.Normalize(); err != nil {
+		writeJSON(w, map[string]string{"error": "配置校验失败: " + err.Error()})
+		return
+	}
+	if err := config.Save(s.cfgPath, &next); err != nil {
+		writeJSON(w, map[string]string{"error": "保存失败: " + err.Error()})
+		return
+	}
+	latest, err := config.Load(s.cfgPath)
+	if err != nil {
+		writeJSON(w, map[string]string{"error": "重新加载失败: " + err.Error()})
+		return
+	}
+	if s.onProfiles != nil {
+		s.onProfiles(latest)
+	}
+
+	st := s.status.Load().(*Status)
+	st.Profiles = buildProfileStatuses(latest)
+	if len(st.Profiles) > 0 {
+		st.TargetDomain = st.Profiles[0].TargetDomain
+		st.CustomDomain = ""
+		if len(st.Profiles[0].Regions) > 0 {
+			st.CustomDomain = st.Profiles[0].Regions[0].CustomDomain
+		}
+		st.ProbeSource = st.Profiles[0].ProbeSource
+		st.Carrier = st.Profiles[0].Carrier
+		st.CarrierLabel = st.Profiles[0].CarrierLabel
+	}
+	s.UpdateStatus(st)
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func buildProfileStatuses(cfg *config.Config) []ProfileStatus {
+	profiles := make([]ProfileStatus, 0, len(cfg.AirportProfiles))
+	for _, profile := range cfg.AirportProfiles {
+		regions := make([]RegionStatus, 0, len(profile.RegionRecords)+1)
+		if profile.EntryRecord.CustomDomain != "" || profile.EntryRecord.RecordID != "" {
+			label := profile.EntryRecord.Label
+			if label == "" {
+				label = "全局最快"
+			}
+			regions = append(regions, RegionStatus{
+				Region:       "entry",
+				Label:        label,
+				CustomDomain: profile.EntryRecord.CustomDomain,
+				Status:       "no_candidate",
+			})
+		}
+		profiles = append(profiles, ProfileStatus{
+			ID:            profile.ID,
+			Name:          profile.Name,
+			Slug:          profile.Slug,
+			TargetDomain:  profile.TargetDomain,
+			TargetDomains: append([]string(nil), profile.TargetDomains...),
+			ProbeSource:   profile.ProbeSource,
+			Carrier:       profile.Carrier,
+			CarrierLabel:  config.EffectiveCarrierLabelFor(profile.Carrier, profile.ProbeSource),
+			Regions:       regions,
+		})
+	}
+	return profiles
 }
 
 func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
@@ -582,6 +860,7 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	st := s.status.Load().(*Status)
+	multiProfileMode := len(st.Profiles) > 0
 
 	// Build what changed
 	var newTarget, newCustom, newProbeSource, newCarrier, newPingMode, newFallbackBaselineIP, newAlertWebhookURL string
@@ -608,16 +887,16 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	hasTimePenaltyScore := false
 	hasTimePenaltyKeywords := false
 
-	if body.TargetDomain != nil && *body.TargetDomain != "" && *body.TargetDomain != st.TargetDomain {
+	if !multiProfileMode && body.TargetDomain != nil && *body.TargetDomain != "" && *body.TargetDomain != st.TargetDomain {
 		newTarget = *body.TargetDomain
 	}
-	if body.CustomDomain != nil && *body.CustomDomain != "" && *body.CustomDomain != st.CustomDomain {
+	if !multiProfileMode && body.CustomDomain != nil && *body.CustomDomain != "" && *body.CustomDomain != st.CustomDomain {
 		newCustom = *body.CustomDomain
 	}
-	if body.ProbeSource != nil && *body.ProbeSource != "" && *body.ProbeSource != st.ProbeSource {
+	if !multiProfileMode && body.ProbeSource != nil && *body.ProbeSource != "" && *body.ProbeSource != st.ProbeSource {
 		newProbeSource = *body.ProbeSource
 	}
-	if body.Carrier != nil {
+	if !multiProfileMode && body.Carrier != nil {
 		candidate := config.NormalizeCarrier(*body.Carrier)
 		if candidate != st.Carrier {
 			newCarrier = candidate
