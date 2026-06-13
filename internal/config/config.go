@@ -363,6 +363,62 @@ func CountryCodeToRegion(countryCode string) string {
 	return countryCodeToRegion(countryCode)
 }
 
+func CarrierDomainPrefix(carrier string) string {
+	switch NormalizeCarrier(carrier) {
+	case "unicom":
+		return "cu"
+	case "telecom":
+		return "ct"
+	case "mobile":
+		return "cm"
+	case "all":
+		return "all"
+	default:
+		return "auto"
+	}
+}
+
+func ProfileRecordDomain(baseDomain string, profile AirportProfile, region string) string {
+	return profileRecordDomain(baseDomain, profile, EffectiveCarrierFor(profile.Carrier, profile.ProbeSource), region)
+}
+
+func CarrierRecordDomain(baseDomain string, profile AirportProfile, carrier, region string) string {
+	return profileRecordDomain(baseDomain, profile, carrier, region)
+}
+
+func profileRecordDomain(baseDomain string, profile AirportProfile, carrier, region string) string {
+	base := strings.TrimPrefix(strings.TrimSpace(baseDomain), ".")
+	slug := normalizeSlug(profile.Slug)
+	if slug == "" {
+		slug = normalizeSlug(profile.ID)
+	}
+	region = NormalizeRegion(region)
+	prefix := CarrierDomainPrefix(carrier)
+	if base == "" || slug == "" || region == "" || prefix == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s-%s-%s.%s", prefix, slug, region, base)
+}
+
+func shouldUseGeneratedProfileDomain(current, baseDomain string, profile AirportProfile, carrier, region string) bool {
+	current = strings.TrimSpace(current)
+	if current == "" {
+		return true
+	}
+	base := strings.TrimPrefix(strings.TrimSpace(baseDomain), ".")
+	slug := normalizeSlug(profile.Slug)
+	if slug == "" {
+		slug = normalizeSlug(profile.ID)
+	}
+	region = NormalizeRegion(region)
+	if base == "" || slug == "" || region == "" {
+		return false
+	}
+	legacyRegion := fmt.Sprintf("%s-%s.%s", slug, region, base)
+	legacyCarrier := fmt.Sprintf("%s-%s.%s", slug, NormalizeCarrier(carrier), base)
+	return strings.EqualFold(current, legacyRegion) || strings.EqualFold(current, legacyCarrier)
+}
+
 func (c *Config) normalizeAirportProfiles() error {
 	for i := range c.AirportProfiles {
 		p := &c.AirportProfiles[i]
@@ -405,8 +461,8 @@ func (c *Config) normalizeAirportProfiles() error {
 		if p.EntryRecord.Label == "" {
 			p.EntryRecord.Label = "全局最快"
 		}
-		if p.EntryRecord.CustomDomain == "" && c.BaseDomain != "" {
-			p.EntryRecord.CustomDomain = fmt.Sprintf("%s-entry.%s", p.Slug, strings.TrimPrefix(c.BaseDomain, "."))
+		if shouldUseGeneratedProfileDomain(p.EntryRecord.CustomDomain, c.BaseDomain, *p, p.Carrier, "entry") {
+			p.EntryRecord.CustomDomain = ProfileRecordDomain(c.BaseDomain, *p, "entry")
 		}
 		nextRecords := make(map[string]RegionRecord, len(p.RegionRecords))
 		for key, rec := range p.RegionRecords {
@@ -417,8 +473,8 @@ func (c *Config) normalizeAirportProfiles() error {
 			if rec.Label == "" {
 				rec.Label = RegionLabel(region)
 			}
-			if rec.CustomDomain == "" && c.BaseDomain != "" {
-				rec.CustomDomain = fmt.Sprintf("%s-%s.%s", p.Slug, region, strings.TrimPrefix(c.BaseDomain, "."))
+			if shouldUseGeneratedProfileDomain(rec.CustomDomain, c.BaseDomain, *p, p.Carrier, region) {
+				rec.CustomDomain = ProfileRecordDomain(c.BaseDomain, *p, region)
 			}
 			if rec.RecordID == "" {
 				rec.RecordID = rec.Cloudflare.RecordID
@@ -442,8 +498,8 @@ func (c *Config) normalizeAirportProfiles() error {
 			if rec.Label == "" {
 				rec.Label = CarrierLabel(carrier)
 			}
-			if rec.CustomDomain == "" && c.BaseDomain != "" {
-				rec.CustomDomain = fmt.Sprintf("%s-%s.%s", p.Slug, carrier, strings.TrimPrefix(c.BaseDomain, "."))
+			if shouldUseGeneratedProfileDomain(rec.CustomDomain, c.BaseDomain, *p, carrier, "entry") {
+				rec.CustomDomain = CarrierRecordDomain(c.BaseDomain, *p, carrier, "entry")
 			}
 			if rec.RecordID == "" {
 				rec.RecordID = rec.Cloudflare.RecordID

@@ -133,7 +133,7 @@ img.region-flag{display:block;object-fit:cover;background:rgba(255,255,255,.08)}
       </div>
       <aside class="panel side-panel">
         <div class="side-title"><h2>运行参数</h2><span class="mode-badge" id="pingModeBadge">ICMP</span></div>
-        <div class="stat-card"><div class="label">机场缩写</div><div class="value" id="profileSlugSide">-</div><div class="hint" id="profileSlugHint">用于生成地区域名前缀</div></div>
+        <div class="stat-card"><div class="label">机场缩写</div><div class="value" id="profileSlugSide">-</div><div class="hint" id="profileSlugHint">用于生成 运营商-机场-地区 子域名</div></div>
         <div class="stat-card"><div class="label">自定义域名</div><div class="value" id="customDomainSide">-</div><div class="hint">检测结果会更新到此记录</div></div>
         <div class="stat-card"><div class="label">Ping 方式</div><div class="value" id="pingMode">-</div><div class="hint" id="pingModeHint">ICMP 测主机延迟，TCP 测端口连通性</div></div>
         <div class="stat-card"><div class="label">检测周期</div><div class="value" id="intervalSide">-</div><div class="hint">可在管理设置中调整</div></div>
@@ -186,7 +186,7 @@ img.region-flag{display:block;object-fit:cover;background:rgba(255,255,255,.08)}
       <div class="settings-panel" data-panel="airports">
         <div class="airport-settings">
           <div class="airport-toolbar">
-            <div class="field"><label for="inputBaseDomain">主域名</label><input type="text" id="inputBaseDomain" placeholder="example.net" autocomplete="off"><div class="hint">地区域名会按 机场缩写-地区.主域名 自动生成。</div></div>
+            <div class="field"><label for="inputBaseDomain">主域名</label><input type="text" id="inputBaseDomain" placeholder="example.net" autocomplete="off"><div class="hint">地区域名会按 运营商-机场缩写-地区.主域名 自动生成，例如 ct-sntp-hk.example.net。</div></div>
             <button class="btn btn-ghost" type="button" id="airportAddBtn">新增机场</button>
           </div>
           <div class="airport-list" id="airportProfilesEditor"></div>
@@ -406,7 +406,7 @@ els.currentIPHint.textContent=primaryRegion?(primaryRegion.label+' · '+(primary
 els.customDomain.textContent=profile?profileTargetSummary(profile):(s.customDomain||'-');
 els.customDomainSide.textContent=entryRegion?(entryRegion.customDomain||'-'):(profile?'-':(s.customDomain||'-'));
 els.profileSlugSide.textContent=profile?(profile.slug||profile.id||'-'):'-';
-els.profileSlugHint.textContent=profile?'用于生成 '+(profile.slug||profile.id||'-')+'-地区 的子域名':'用于生成地区域名前缀';
+els.profileSlugHint.textContent=profile?'用于生成 运营商-'+(profile.slug||profile.id||'-')+'-地区 的子域名':'用于生成 运营商-机场-地区 子域名';
 els.probeSourceDisplay.textContent='探测源: '+((profile&&profile.probeSource)||s.probeSource||'-')+' · 策略: '+((profile&&profile.carrierLabel)||s.carrierLabel||'自动识别');
 const discovered=profile?profile.discoveredCount:s.discoveredCount;
 els.discoveredCount.textContent=String(discovered||0);

@@ -466,13 +466,13 @@ func regionRecordFor(cfg *config.Config, profile config.AirportProfile, region s
 			rec.Label = config.RegionLabel(region)
 		}
 		if rec.CustomDomain == "" && cfg.BaseDomain != "" {
-			rec.CustomDomain = fmt.Sprintf("%s-%s.%s", profile.Slug, region, strings.TrimPrefix(cfg.BaseDomain, "."))
+			rec.CustomDomain = config.ProfileRecordDomain(cfg.BaseDomain, profile, region)
 		}
 		return rec
 	}
 	return config.RegionRecord{
 		Label:        config.RegionLabel(region),
-		CustomDomain: fmt.Sprintf("%s-%s.%s", profile.Slug, region, strings.TrimPrefix(cfg.BaseDomain, ".")),
+		CustomDomain: config.ProfileRecordDomain(cfg.BaseDomain, profile, region),
 	}
 }
 
@@ -652,11 +652,16 @@ func runAirportProfileOnce(cfg *config.Config, profile config.AirportProfile, ws
 		regionResults := resultsByRegion[region]
 		profileStatus.Regions = append(profileStatus.Regions, runProfileRecordDecision(cfg, profile, region, rec, regionResults, sc, now))
 	}
+	profileStatus.Regions = append(profileStatus.Regions, runAgentRegionRecordDecisions(cfg, profile, ws, sc, now)...)
 	return profileStatus
 }
 
 func carrierRecordRegion(carrier string) string {
 	return "carrier-" + config.NormalizeCarrier(carrier)
+}
+
+func carrierRegionRecordRegion(carrier, region string) string {
+	return "carrier-" + config.NormalizeCarrier(carrier) + "-" + config.NormalizeRegion(region)
 }
 
 func carrierRecordStatus(carrier string, rec config.RegionRecord) web.RegionStatus {
@@ -723,6 +728,61 @@ func runCarrierRecordDecisions(cfg *config.Config, profile config.AirportProfile
 			continue
 		}
 		statuses = append(statuses, carrierRecordStatus(carrier, profile.CarrierRecords[carrier]))
+	}
+	return statuses
+}
+
+func runAgentRegionRecordDecisions(cfg *config.Config, profile config.AirportProfile, ws *web.Server, sc *switchController, now time.Time) []web.RegionStatus {
+	if ws == nil {
+		return nil
+	}
+	localCarrier := config.EffectiveCarrierFor(profile.Carrier, profile.ProbeSource)
+	ttl := time.Duration(cfg.Agent.ReportTTLSeconds) * time.Second
+	latestByCarrier := make(map[string]agent.Report)
+	for _, report := range ws.AgentReports(ttl) {
+		carrier := config.NormalizeCarrier(report.Carrier)
+		if carrier == "" || carrier == "auto" || carrier == "all" || carrier == localCarrier {
+			continue
+		}
+		prev, ok := latestByCarrier[carrier]
+		if !ok || report.FinishedAt.After(prev.FinishedAt) {
+			latestByCarrier[carrier] = report
+		}
+	}
+	if len(latestByCarrier) == 0 {
+		return nil
+	}
+
+	statuses := make([]web.RegionStatus, 0)
+	for _, carrier := range sortedRegionKeys(latestByCarrier) {
+		report := latestByCarrier[carrier]
+		profileReport := findAgentProfileReport(report, profile.ID)
+		if profileReport == nil {
+			continue
+		}
+		results := checkerResultsFromAgent(profileReport.Results)
+		applyTimePenalty(cfg, sc, results, now)
+		resultsByRegion := make(map[string][]checker.Result)
+		for _, result := range results {
+			geo := sc.geoForIP(ws, result.IP)
+			region := config.CountryCodeToRegion(geo.CountryCode)
+			if region == "" || region == "unknown" {
+				continue
+			}
+			resultsByRegion[region] = append(resultsByRegion[region], result)
+		}
+		if len(resultsByRegion) == 0 {
+			continue
+		}
+		carrierProfile := profile
+		carrierProfile.Carrier = carrier
+		carrierProfile.ProbeSource = report.ProbeSource
+		carrierProfile.RegionRecords = nil
+		for _, region := range sortedRegionKeys(resultsByRegion) {
+			rec := regionRecordFor(cfg, carrierProfile, region)
+			rec.Label = config.CarrierLabel(carrier) + " · " + config.RegionLabel(region)
+			statuses = append(statuses, runProfileRecordDecision(cfg, carrierProfile, carrierRegionRecordRegion(carrier, region), rec, resultsByRegion[region], sc, now))
+		}
 	}
 	return statuses
 }

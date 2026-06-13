@@ -13,7 +13,7 @@
 - 不是看到更低延迟就立即切换，而是带有 `阈值 + 稳定时长` 的防抖策略
 - 支持按本地时间窗口对指定 IDC / ISP 动态加权，避免深夜抖动节点误切换
 - 支持多机场入口：每个机场可配置独立入口域名、缩写、探测源与运营商策略
-- 支持按 IP 归属地拆分地区记录，例如 `airport-a-hk.example.net`、`airport-a-my.example.net`
+- 支持按 IP 归属地拆分地区记录，例如 `ct-sntp-hk.example.net`、`ct-sntp-my.example.net`
 - 支持主控 + Agent 子机模式：电信、联通、移动机器可在各自网络里探测并上报结果
 - Cloudflare API 支持走代理
 - Web 仪表盘支持在线修改主要配置并即时生效
@@ -125,14 +125,9 @@ airport_profiles:
     carrier: "auto"
     entry_record:
       label: "全局最快"
-      custom_domain: "sntp-entry.example.net"
     carrier_records:
-      unicom:
-        label: "联通最快"
-        custom_domain: "sntp-unicom.example.net"
       telecom:
         label: "电信最快"
-        custom_domain: "sntp-telecom.example.net"
 ```
 
 电信 Agent 子机配置示例：
@@ -370,7 +365,7 @@ dns_servers:
 
 ### 多机场 / 多地区入口
 
-如果要让不同机场、不同地区分别更新到独立子域名，可以保留全局 Cloudflare token 和 `zone_id`，然后配置 `airport_profiles`。当某个地区没有显式写 `custom_domain` 时，会按 `{slug}-{region}.{base_domain}` 自动生成。
+如果要让不同机场、不同地区分别更新到独立子域名，可以保留全局 Cloudflare token 和 `zone_id`，然后配置 `airport_profiles`。当某个地区没有显式写 `custom_domain` 时，会按 `{carrier}-{slug}-{region}.{base_domain}` 自动生成，其中运营商前缀为 `ct`（电信）、`cu`（联通）、`cm`（移动）。
 
 ```yaml
 cloudflare:
@@ -386,7 +381,7 @@ airport_profiles:
     target_domains:
       - "entry-a-1.example.com"
       - "entry-a-2.example.com"
-    probe_source: "城市运营商"
+    probe_source: "宁波电信"
     carrier: "auto"
     entry_record:
       label: "全局最快"
@@ -404,6 +399,8 @@ airport_profiles:
     slug: "airport-b"
     target_domains:
       - "entry-b.example.com"
+    probe_source: "宁波电信"
+    carrier: "auto"
     entry_record:
       record_id: "cloudflare-record-id-for-airport-b-entry"
     region_records:
@@ -414,13 +411,13 @@ airport_profiles:
 
 上面的配置会自动对应这些域名：
 
-- `airport-a-hk.example.net`
-- `airport-a-my.example.net`
-- `airport-a-entry.example.net`
-- `airport-b-entry.example.net`
-- `airport-b-hk.example.net`
+- `ct-airport-a-hk.example.net`
+- `ct-airport-a-my.example.net`
+- `ct-airport-a-entry.example.net`
+- `ct-airport-b-entry.example.net`
+- `ct-airport-b-hk.example.net`
 
-每轮检测会先解析机场入口域名；如果一个机场配置了多个 `target_domains`，会把这些域名解析出的 IP 合并去重后统一探测。随后再按 IP 归属地分组；例如解析出 3 个香港 IP 和 1 个马来西亚 IP 时，系统会在香港组内选最优 IP 更新 `airport-a-hk.example.net`，马来西亚组只有一个健康 IP 时则直接更新 `airport-a-my.example.net`。`entry_record` 会从该机场解析出的全部健康 IP 里选综合最优，更新到 `airport-a-entry.example.net`。每个机场和地区都有独立的稳定窗口，互不影响。
+每轮检测会先解析机场入口域名；如果一个机场配置了多个 `target_domains`，会把这些域名解析出的 IP 合并去重后统一探测。随后再按 IP 归属地分组；例如电信探测源解析出 3 个香港 IP 和 1 个马来西亚 IP 时，系统会在香港组内选最优 IP 更新 `ct-sntp-hk.example.net`，马来西亚组只有一个健康 IP 时则直接更新 `ct-sntp-my.example.net`。`entry_record` 会从该机场解析出的全部健康 IP 里选综合最优，更新到 `ct-sntp-entry.example.net`。每个机场和地区都有独立的稳定窗口，互不影响。
 
 当前内置地区代码包括：
 
