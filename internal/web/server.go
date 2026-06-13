@@ -197,6 +197,8 @@ func (s *Server) Start() {
 	mux.HandleFunc("/api/airport-profiles", s.handleAPIAirportProfiles)
 	mux.HandleFunc("/api/agent/jobs", s.handleAPIAgentJobs)
 	mux.HandleFunc("/api/agent/reports", s.handleAPIAgentReports)
+	mux.HandleFunc("/api/agent/install.sh", s.handleAPIAgentInstallScript)
+	mux.HandleFunc("/api/agent/download/linux-amd64", s.handleAPIAgentDownload)
 	mux.HandleFunc("/api/check", s.handleCheck)
 	mux.HandleFunc("/api/events", s.handleSSE)
 
@@ -638,6 +640,202 @@ func (s *Server) handleAPILogs(w http.ResponseWriter, r *http.Request) {
 		logs = logs[len(logs)-maxLogs:]
 	}
 	writeJSON(w, logs)
+}
+
+func (s *Server) handleAPIAgentInstallScript(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg, err := config.Load(s.cfgPath)
+	if err != nil {
+		http.Error(w, "load config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	token := strings.TrimSpace(cfg.Agent.Token)
+	if token == "" {
+		http.Error(w, "agent token is not configured; set it in Agent 探针 first", http.StatusConflict)
+		return
+	}
+	controllerURL := publicBaseURL(r)
+	script := renderAgentInstallScript(controllerURL, token, cfg.CheckIntervalSec)
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(script))
+}
+
+func (s *Server) handleAPIAgentDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path, ok := findAgentBinary()
+	if !ok {
+		http.Error(w, "agent binary not found on controller; place dns-latency-router-agent-linux-amd64 next to controller binary", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="dns-latency-router-agent"`)
+	http.ServeFile(w, r, path)
+}
+
+func publicBaseURL(r *http.Request) string {
+	scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if scheme == "" {
+		if r.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = r.Host
+	}
+	return strings.TrimRight(scheme+"://"+host, "/")
+}
+
+func findAgentBinary() (string, bool) {
+	names := []string{
+		"dns-latency-router-agent-linux-amd64",
+		"dns-latency-router-agent",
+		"dns-latency-router-agent.exe",
+	}
+	dirs := []string{}
+	if exe, err := os.Executable(); err == nil {
+		dirs = append(dirs, filepath.Dir(exe))
+	}
+	if wd, err := os.Getwd(); err == nil {
+		dirs = append(dirs, wd)
+	}
+	for _, dir := range dirs {
+		for _, name := range names {
+			path := filepath.Join(dir, name)
+			if info, err := os.Stat(path); err == nil && !info.IsDir() {
+				return path, true
+			}
+		}
+	}
+	return "", false
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func renderAgentInstallScript(controllerURL, token string, interval int) string {
+	if interval <= 0 {
+		interval = 300
+	}
+	return fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+
+CONTROLLER_URL=%s
+TOKEN=%s
+INSTALL_DIR="${INSTALL_DIR:-/opt/dns-latency-router-agent}"
+CONFIG_FILE="${CONFIG_FILE:-$INSTALL_DIR/agent.yaml}"
+SERVICE_NAME="${SERVICE_NAME:-dns-latency-router-agent}"
+BIN_NAME="dns-latency-router-agent"
+AGENT_ID="${AGENT_ID:-}"
+AGENT_NAME="${AGENT_NAME:-}"
+PROBE_SOURCE="${PROBE_SOURCE:-}"
+CARRIER="${CARRIER:-auto}"
+REPORT_INTERVAL="${REPORT_INTERVAL:-%d}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --id) AGENT_ID="$2"; shift 2 ;;
+    --name) AGENT_NAME="$2"; shift 2 ;;
+    --probe-source|--region) PROBE_SOURCE="$2"; shift 2 ;;
+    --carrier) CARRIER="$2"; shift 2 ;;
+    --controller) CONTROLLER_URL="$2"; shift 2 ;;
+    --interval) REPORT_INTERVAL="$2"; shift 2 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "please run as root" >&2
+  exit 1
+fi
+
+host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo agent)"
+if [ -z "$AGENT_ID" ]; then
+  suffix="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6 || true)"
+  if [ -z "$suffix" ]; then suffix="$(date +%%s)"; fi
+  AGENT_ID="dlr-$host-$suffix"
+fi
+AGENT_ID="$(printf '%%s' "$AGENT_ID" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')"
+if [ -z "$AGENT_NAME" ]; then AGENT_NAME="$host"; fi
+if [ -z "$PROBE_SOURCE" ]; then PROBE_SOURCE="$AGENT_NAME"; fi
+
+download() {
+  url="$1"
+  out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL "$url" -o "$out"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$out" "$url"
+  else
+    echo "curl or wget is required" >&2
+    exit 1
+  fi
+}
+
+yaml_quote() {
+  printf "'%%s'" "$(printf '%%s' "$1" | sed "s/'/''/g")"
+}
+
+mkdir -p "$INSTALL_DIR"
+download "$CONTROLLER_URL/api/agent/download/linux-amd64" "$INSTALL_DIR/$BIN_NAME"
+chmod 0755 "$INSTALL_DIR/$BIN_NAME"
+
+{
+  echo "node_role: agent"
+  echo "agent:"
+  echo "  id: $(yaml_quote "$AGENT_ID")"
+  echo "  name: $(yaml_quote "$AGENT_NAME")"
+  echo "  controller_url: $(yaml_quote "$CONTROLLER_URL")"
+  echo "  token: $(yaml_quote "$TOKEN")"
+  echo "  probe_source: $(yaml_quote "$PROBE_SOURCE")"
+  echo "  carrier: $(yaml_quote "$CARRIER")"
+  echo "  report_interval_seconds: $REPORT_INTERVAL"
+  echo "ping_mode: icmp"
+  echo "ping_port: 443"
+  echo "ping_timeout_seconds: 5"
+  echo "ping_attempts: 4"
+} > "$CONFIG_FILE"
+chmod 0600 "$CONFIG_FILE"
+
+cat > "/etc/systemd/system/$SERVICE_NAME.service" <<UNIT
+[Unit]
+Description=DNS Latency Router Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/$BIN_NAME $CONFIG_FILE
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now "$SERVICE_NAME"
+sleep 2
+systemctl --no-pager --full status "$SERVICE_NAME" || true
+
+echo
+echo "Installed DNS Latency Router agent:"
+echo "  id: $AGENT_ID"
+echo "  name: $AGENT_NAME"
+echo "  controller: $CONTROLLER_URL"
+echo "Open the controller dashboard and edit region/carrier in Agent 探针."
+`, shellQuote(controllerURL), shellQuote(token), interval)
 }
 
 func (s *Server) agentAuthorized(r *http.Request) bool {
@@ -1200,6 +1398,7 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			"agent_token_set":            false,
 			"agent_report_ttl_seconds":   900,
 			"agents":                     []agentPeerPayload{},
+			"agent_statuses":             []AgentStatus{},
 		}
 		if cfg, err := config.Load(s.cfgPath); err == nil {
 			payload["cloudflare_api_token_set"] = strings.TrimSpace(cfg.Cloudflare.APIToken) != ""
@@ -1208,6 +1407,7 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			payload["agent_token_set"] = strings.TrimSpace(cfg.Agent.Token) != ""
 			payload["agent_report_ttl_seconds"] = cfg.Agent.ReportTTLSeconds
 			payload["agents"] = agentPeersToPayload(cfg.Agents)
+			payload["agent_statuses"] = s.AgentStatuses(0)
 		}
 		writeJSON(w, payload)
 		return
@@ -1615,8 +1815,10 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	hasRuntimeConfigChange := newTarget != "" || newCustom != "" || newProbeSource != "" || hasCarrier || hasPingMode || hasPingPort || hasCheckInterval || hasPingAttempts || hasLatencyWeight || hasJitterWeight || hasLossWeight || hasSwitchImprovement || hasSwitchStableSec || hasFailedOrphanTTLHours || hasFallbackBaselineIP || hasAlertWebhookURL || hasTimePenaltyStartHour || hasTimePenaltyEndHour || hasTimePenaltyScore || hasTimePenaltyKeywords
+
 	// Notify main loop
-	if s.onConfig != nil {
+	if s.onConfig != nil && hasRuntimeConfigChange {
 		finalTarget := newTarget
 		if finalTarget == "" {
 			finalTarget = st.TargetDomain
@@ -1787,8 +1989,21 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	s.UpdateStatus(st)
 
-	log.Printf("[config] updated: target_domain=%q custom_domain=%q probe_source=%q carrier=%q ping_mode=%q ping_port=%d check_interval=%d ping_attempts=%d latency_weight=%.2f jitter_weight=%.2f loss_weight=%.2f switch_improvement=%.2f switch_stable_seconds=%d failed_orphan_ttl_hours=%d fallback_baseline_ip=%q alert_webhook_url_set=%t time_penalty=%02d-%02d/+%.2f keywords=%q",
-		newTarget, newCustom, newProbeSource, newCarrier, newPingMode, newPingPort, newCheckInterval, newPingAttempts, newLatencyWeight, newJitterWeight, newLossWeight, newSwitchImprovement, newSwitchStableSec, newFailedOrphanTTLHours, newFallbackBaselineIP, newAlertWebhookURL != "", newTimePenaltyStartHour, newTimePenaltyEndHour, newTimePenaltyScore, newTimePenaltyKeywords)
+	if hasRuntimeConfigChange {
+		log.Printf("[config] updated: target_domain=%q custom_domain=%q probe_source=%q carrier=%q ping_mode=%q ping_port=%d check_interval=%d ping_attempts=%d latency_weight=%.2f jitter_weight=%.2f loss_weight=%.2f switch_improvement=%.2f switch_stable_seconds=%d failed_orphan_ttl_hours=%d fallback_baseline_ip=%q alert_webhook_url_set=%t time_penalty=%02d-%02d/+%.2f keywords=%q",
+			newTarget, newCustom, newProbeSource, newCarrier, newPingMode, newPingPort, newCheckInterval, newPingAttempts, newLatencyWeight, newJitterWeight, newLossWeight, newSwitchImprovement, newSwitchStableSec, newFailedOrphanTTLHours, newFallbackBaselineIP, newAlertWebhookURL != "", newTimePenaltyStartHour, newTimePenaltyEndHour, newTimePenaltyScore, newTimePenaltyKeywords)
+	}
+	if hasAgentToken || hasAgentReportTTL || hasAgentPeers {
+		agentTTL := cfgForCloudflare.Agent.ReportTTLSeconds
+		if hasAgentReportTTL {
+			agentTTL = newAgentReportTTL
+		}
+		agentCount := len(cfgForCloudflare.Agents)
+		if hasAgentPeers {
+			agentCount = len(nextAgentPeers)
+		}
+		log.Printf("[config] agent settings updated: token_set=%t report_ttl_seconds=%d agents=%d", strings.TrimSpace(cfgForCloudflare.Agent.Token) != "" || hasAgentToken, agentTTL, agentCount)
+	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
