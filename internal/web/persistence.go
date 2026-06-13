@@ -78,18 +78,6 @@ func sampleKey(agentID, profileID, region, ip string) string {
 	return agentID + "|" + profileID + "|" + region + "|" + ip
 }
 
-func fallbackGeoLabel(region, label string) string {
-	region = strings.TrimSpace(strings.ToLower(region))
-	label = strings.TrimSpace(label)
-	if label == "" {
-		return ""
-	}
-	if region == "" || region == "entry" || region == "default" || region == "unknown" || strings.HasPrefix(region, "carrier-") {
-		return ""
-	}
-	return label
-}
-
 func (s *Server) loadPersistedData() {
 	s.logBuf = s.loadLogs()
 	s.history = s.loadHistory()
@@ -281,7 +269,6 @@ func (s *Server) pruneInactiveOrphanSamplesLocked() bool {
 	for _, ip := range prunedList {
 		delete(s.geoCache, ip)
 		delete(s.geoPending, ip)
-		delete(s.geoRetryAfter, ip)
 	}
 	s.geoMu.Unlock()
 
@@ -358,7 +345,7 @@ func (s *Server) computeIPStats() []IPStat {
 		stat.Geo = s.geoLabel(stat.IP)
 		if stat.Geo == "" {
 			missingGeo = append(missingGeo, stat.IP)
-			stat.Geo = fallbackGeoLabel(stat.Region, stat.RegionLabel)
+			stat.Geo = "未知"
 		}
 		stat.Active = s.isIPActiveInProfile(stat.ProfileID, stat.IP)
 		if stat.Active {
