@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"dns-latency-router/internal/agent"
+	"dns-latency-router/internal/checker"
 	"dns-latency-router/internal/config"
 )
 
@@ -328,6 +329,7 @@ func (s *Server) AddLog(line string) {
 
 // AddSamples stores per-IP latency samples for long-term stats.
 func (s *Server) AddSamples(samples []IPSample) {
+	samples = filterUsableSamples(samples)
 	if len(samples) == 0 {
 		return
 	}
@@ -361,24 +363,7 @@ func sampleIPs(samples []IPSample) []string {
 }
 
 func isPublicIPv4(ip string) bool {
-	parsed := net.ParseIP(ip)
-	if parsed == nil {
-		return false
-	}
-	v4 := parsed.To4()
-	if v4 == nil {
-		return false
-	}
-	if v4[0] == 10 || v4[0] == 127 {
-		return false
-	}
-	if v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31 {
-		return false
-	}
-	if v4[0] == 192 && v4[1] == 168 {
-		return false
-	}
-	return true
+	return checker.IsUsableCandidateIP(ip)
 }
 
 func (s *Server) UpdateResolvedIPs(ips []string) {
@@ -388,10 +373,9 @@ func (s *Server) UpdateResolvedIPs(ips []string) {
 func (s *Server) UpdateResolvedIPsForProfile(profileID string, ips []string) {
 	next := make(map[string]bool, len(ips))
 	for _, ip := range ips {
-		if ip == "" {
-			continue
+		if normalized, ok := checker.NormalizeCandidateIP(ip); ok {
+			next[normalized] = true
 		}
-		next[ip] = true
 	}
 	s.activeIPsMu.Lock()
 	if profileID == "" {
@@ -407,6 +391,22 @@ func (s *Server) UpdateResolvedIPsForProfile(profileID string, ips []string) {
 		s.activeIPs = merged
 	}
 	s.activeIPsMu.Unlock()
+}
+
+func filterUsableSamples(samples []IPSample) []IPSample {
+	if len(samples) == 0 {
+		return nil
+	}
+	out := samples[:0]
+	for _, sample := range samples {
+		normalized, ok := checker.NormalizeCandidateIP(sample.IP)
+		if !ok {
+			continue
+		}
+		sample.IP = normalized
+		out = append(out, sample)
+	}
+	return out
 }
 
 func (s *Server) isIPActive(ip string) bool {
@@ -668,6 +668,7 @@ func (s *Server) handleAPIIPSamples(w http.ResponseWriter, r *http.Request) {
 	for i := range samples {
 		samples[i] = normalizeIPSampleWithAssignments(samples[i], assignments)
 	}
+	samples = filterUsableSamples(samples)
 	writeJSON(w, samples)
 }
 
@@ -858,6 +859,27 @@ func normalizeAgentReportWithAssignments(report agent.Report, assignments map[st
 	return report
 }
 
+func sanitizeAgentReportCandidates(report agent.Report) agent.Report {
+	for profileIdx := range report.Profiles {
+		profile := &report.Profiles[profileIdx]
+		profile.ResolvedIPs = checker.FilterUsableCandidateIPs(profile.ResolvedIPs)
+		results := profile.Results[:0]
+		for _, result := range profile.Results {
+			normalized, ok := checker.NormalizeCandidateIP(result.IP)
+			if !ok {
+				continue
+			}
+			result.IP = normalized
+			results = append(results, result)
+		}
+		profile.Results = results
+		if len(profile.ResolvedIPs) == 0 && len(profile.Results) == 0 && profile.Error == "" {
+			profile.Error = "no usable public IPv4 candidates after filtering reserved/fake-ip results"
+		}
+	}
+	return report
+}
+
 func normalizeIPSampleWithAssignments(sample IPSample, assignments map[string]agentAssignment) IPSample {
 	if strings.TrimSpace(sample.AgentID) == "" {
 		return sample
@@ -1032,7 +1054,7 @@ func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "agentId is required"})
 		return
 	}
-	report = normalizeAgentReportWithAssignments(report, s.agentAssignments())
+	report = sanitizeAgentReportCandidates(normalizeAgentReportWithAssignments(report, s.agentAssignments()))
 	if report.FinishedAt.IsZero() {
 		report.FinishedAt = time.Now()
 	}
@@ -1073,6 +1095,9 @@ func agentSamplesFromReport(report agent.Report) []IPSample {
 	}
 	for _, profile := range report.Profiles {
 		for _, result := range profile.Results {
+			if !checker.IsUsableCandidateIP(result.IP) {
+				continue
+			}
 			sample := IPSample{
 				Time:         report.FinishedAt,
 				AgentID:      report.AgentID,

@@ -3,11 +3,15 @@ package checker
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
 	"net"
+	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,18 +51,42 @@ func ResolveFromAllDNS(domain string, dnsServers []string) ([]string, error) {
 	}
 
 	ipSet := make(map[string]bool)
+	filtered := 0
+	var failures []string
 	for range dnsServers {
 		r := <-ch
 		if r.err != nil {
+			failures = append(failures, r.err.Error())
 			continue
 		}
 		for _, ip := range r.ips {
+			if normalized, ok := NormalizeCandidateIP(ip); ok {
+				ipSet[normalized] = true
+			} else {
+				filtered++
+			}
+		}
+	}
+
+	if len(ipSet) == 0 {
+		ips, err := resolveFromDoH(domain)
+		if err != nil {
+			failures = append(failures, "doh: "+err.Error())
+		}
+		for _, ip := range ips {
 			ipSet[ip] = true
 		}
 	}
 
 	if len(ipSet) == 0 {
-		return nil, fmt.Errorf("all DNS servers failed to resolve %s", domain)
+		detail := strings.Join(failures, "; ")
+		if detail == "" && filtered > 0 {
+			detail = fmt.Sprintf("filtered %d non-public/reserved candidate(s)", filtered)
+		}
+		if detail == "" {
+			detail = "no usable public IPv4 candidates"
+		}
+		return nil, fmt.Errorf("all DNS servers failed to resolve usable public IPv4 for %s: %s", domain, detail)
 	}
 
 	unique := make([]string, 0, len(ipSet))
@@ -83,6 +111,86 @@ func resolveFromDNS(domain, dnsServer string) ([]string, error) {
 		return nil, fmt.Errorf("dns %s: %w", dnsServer, err)
 	}
 	return ips, nil
+}
+
+func resolveFromDoH(domain string) ([]string, error) {
+	endpoints := []string{
+		"https://1.1.1.1/dns-query",
+		"https://1.0.0.1/dns-query",
+	}
+	client := &http.Client{Timeout: dnsTimeout}
+	var failures []string
+	for _, endpoint := range endpoints {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		q := u.Query()
+		q.Set("name", domain)
+		q.Set("type", "A")
+		u.RawQuery = q.Encode()
+		req, err := http.NewRequest("GET", u.String(), nil)
+		if err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		req.Header.Set("Accept", "application/dns-json")
+		resp, err := client.Do(req)
+		if err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		var payload struct {
+			Status int `json:"Status"`
+			Answer []struct {
+				Type int    `json:"type"`
+				Data string `json:"data"`
+			} `json:"Answer"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&payload)
+		resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			failures = append(failures, fmt.Sprintf("%s returned HTTP %d", endpoint, resp.StatusCode))
+			continue
+		}
+		if decodeErr != nil {
+			failures = append(failures, decodeErr.Error())
+			continue
+		}
+		if payload.Status != 0 {
+			failures = append(failures, fmt.Sprintf("%s returned DNS status %d", endpoint, payload.Status))
+			continue
+		}
+		ips := make([]string, 0, len(payload.Answer))
+		for _, answer := range payload.Answer {
+			if answer.Type != 1 {
+				continue
+			}
+			if ip, ok := NormalizeCandidateIP(answer.Data); ok {
+				ips = append(ips, ip)
+			}
+		}
+		if len(ips) > 0 {
+			return dedupeSorted(ips), nil
+		}
+		failures = append(failures, endpoint+" returned no usable A records")
+	}
+	return nil, fmt.Errorf("%s", strings.Join(failures, "; "))
+}
+
+func dedupeSorted(values []string) []string {
+	set := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := set[value]; ok {
+			continue
+		}
+		set[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // pingICMP sends an ICMP echo request and measures round-trip time.

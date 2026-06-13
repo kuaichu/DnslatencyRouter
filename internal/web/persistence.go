@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"dns-latency-router/internal/checker"
 )
 
 const (
@@ -189,9 +191,11 @@ func pruneSamples(samples []IPSample) []IPSample {
 	cutoff := time.Now().Add(-retentionWindow)
 	out := samples[:0]
 	for _, rec := range samples {
-		if rec.Time.Before(cutoff) {
+		normalized, ok := checker.NormalizeCandidateIP(rec.IP)
+		if rec.Time.Before(cutoff) || !ok {
 			continue
 		}
+		rec.IP = normalized
 		out = append(out, rec)
 	}
 	if len(out) > maxSampleItems {
@@ -288,6 +292,9 @@ func (s *Server) computeIPStats() []IPStat {
 	lossRateSum := make(map[string]float64)
 
 	for _, rawSample := range s.samples {
+		if !checker.IsUsableCandidateIP(rawSample.IP) {
+			continue
+		}
 		sample := normalizeIPSampleWithAssignments(rawSample, assignments)
 		key := sampleKey(sample.AgentID, sample.ProfileID, sample.Region, sample.IP)
 		stat := statsMap[key]

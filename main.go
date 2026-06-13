@@ -848,8 +848,12 @@ func findAgentProfileReport(report agent.Report, profileID string) *agent.Profil
 func checkerResultsFromAgent(results []agent.Result) []checker.Result {
 	out := make([]checker.Result, 0, len(results))
 	for _, result := range results {
+		ip, ok := checker.NormalizeCandidateIP(result.IP)
+		if !ok {
+			continue
+		}
 		next := checker.Result{
-			IP:        result.IP,
+			IP:        ip,
 			Latency:   time.Duration(result.Latency * float64(time.Millisecond)),
 			Jitter:    time.Duration(result.Jitter * float64(time.Millisecond)),
 			LossRate:  result.LossRate,
@@ -950,8 +954,12 @@ func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile,
 	if best == nil {
 		sc.resetRoute(routeKey)
 		log.Printf("[error] [%s/%s] no healthy candidate for %s", profile.ID, region, recordTargetLabel(rec))
-		if len(results) > 0 {
-			log.Printf("[update] [%s/%s] deleting %s because all %d resolved candidate(s) failed health checks", profile.ID, region, recordTargetLabel(rec), len(results))
+		if len(results) > 0 || (currentIP != "" && !checker.IsUsableCandidateIP(currentIP)) {
+			if currentIP != "" && !checker.IsUsableCandidateIP(currentIP) {
+				log.Printf("[update] [%s/%s] deleting %s because current record points to non-public/reserved IP %s", profile.ID, region, recordTargetLabel(rec), currentIP)
+			} else {
+				log.Printf("[update] [%s/%s] deleting %s because all %d resolved candidate(s) failed health checks", profile.ID, region, recordTargetLabel(rec), len(results))
+			}
 			if err := deleteRegionRecord(cf, rec); err != nil {
 				status.Status = "delete_failed"
 				log.Printf("[error] [%s/%s] Cloudflare record delete failed: %v", profile.ID, region, err)
