@@ -75,6 +75,8 @@ func fetchJob(client *http.Client, cfg *config.Config) (*JobResponse, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.Agent.Token)
+	req.Header.Set("X-Agent-ID", cfg.Agent.ID)
+	req.Header.Set("X-Agent-Name", agentName(cfg))
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -114,11 +116,12 @@ func postReport(client *http.Client, cfg *config.Config, report Report) error {
 
 func runJob(cfg *config.Config, job *JobResponse) Report {
 	started := time.Now()
-	carrier := agentCarrier(cfg)
-	source := agentProbeSource(cfg)
+	source := firstString(job.AgentProbeSource, agentProbeSource(cfg))
+	carrier := config.EffectiveCarrierFor(firstString(job.AgentCarrier, cfg.Agent.Carrier), source)
+	name := firstString(job.AgentName, agentName(cfg))
 	report := Report{
 		AgentID:      cfg.Agent.ID,
-		AgentName:    agentName(cfg),
+		AgentName:    name,
 		Carrier:      carrier,
 		CarrierLabel: config.CarrierLabel(carrier),
 		ProbeSource:  source,
@@ -288,4 +291,14 @@ func firstNonNegative(values ...float64) float64 {
 		}
 	}
 	return 0
+}
+
+func firstString(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

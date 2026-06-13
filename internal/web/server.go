@@ -809,6 +809,32 @@ func (s *Server) handleAPIAgentJobs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "load config: " + err.Error()})
 		return
 	}
+	agentID := strings.TrimSpace(r.Header.Get("X-Agent-ID"))
+	if agentID == "" {
+		agentID = strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	}
+	var peer config.AgentPeerConfig
+	peerFound := false
+	for _, candidate := range cfg.Agents {
+		if strings.EqualFold(strings.TrimSpace(candidate.ID), agentID) {
+			peer = candidate
+			peerFound = true
+			break
+		}
+	}
+	agentName := strings.TrimSpace(peer.Name)
+	agentProbeSource := strings.TrimSpace(peer.ProbeSource)
+	agentCarrier := ""
+	agentCarrierLabel := ""
+	if peerFound {
+		agentCarrier = config.NormalizeCarrier(peer.Carrier)
+	}
+	if peerFound && agentCarrier == "" {
+		agentCarrier = "auto"
+	}
+	if peerFound {
+		agentCarrierLabel = config.EffectiveCarrierLabelFor(agentCarrier, agentProbeSource)
+	}
 	profiles := cfg.AirportProfiles
 	if len(profiles) == 0 && cfg.TargetDomain != "" {
 		profiles = []config.AirportProfile{cfg.LegacyProfile()}
@@ -826,6 +852,10 @@ func (s *Server) handleAPIAgentJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, agent.JobResponse{
 		ServerTime:         time.Now(),
+		AgentName:          agentName,
+		AgentProbeSource:   agentProbeSource,
+		AgentCarrier:       agentCarrier,
+		AgentCarrierLabel:  agentCarrierLabel,
 		CheckInterval:      cfg.CheckIntervalSec,
 		PingMode:           cfg.PingMode,
 		PingPort:           cfg.PingPort,
@@ -839,6 +869,26 @@ func (s *Server) handleAPIAgentJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" {
+		cfg, err := config.Load(s.cfgPath)
+		ttl := 15 * time.Minute
+		if err == nil && cfg.Agent.ReportTTLSeconds > 0 {
+			ttl = time.Duration(cfg.Agent.ReportTTLSeconds) * time.Second
+		}
+		reports := s.AgentReports(ttl)
+		sort.Slice(reports, func(i, j int) bool {
+			if reports[i].Carrier != reports[j].Carrier {
+				return reports[i].Carrier < reports[j].Carrier
+			}
+			if reports[i].AgentName != reports[j].AgentName {
+				return reports[i].AgentName < reports[j].AgentName
+			}
+			return reports[i].AgentID < reports[j].AgentID
+		})
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, reports)
+		return
+	}
 	if r.Method != "POST" {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1023,17 +1073,15 @@ func (s *Server) AgentStatuses(ttl time.Duration) []AgentStatus {
 		if strings.TrimSpace(status.Name) == "" {
 			status.Name = id
 		}
-		if strings.TrimSpace(status.Carrier) == "" || status.Carrier == "auto" {
+		if strings.TrimSpace(report.Carrier) != "" {
 			status.Carrier = config.NormalizeCarrier(report.Carrier)
 		}
-		if strings.TrimSpace(status.CarrierLabel) == "" || status.CarrierLabel == config.CarrierLabel("auto") {
-			if report.CarrierLabel != "" {
-				status.CarrierLabel = report.CarrierLabel
-			} else {
-				status.CarrierLabel = config.CarrierLabel(status.Carrier)
-			}
+		if strings.TrimSpace(report.CarrierLabel) != "" {
+			status.CarrierLabel = report.CarrierLabel
+		} else if strings.TrimSpace(status.Carrier) != "" {
+			status.CarrierLabel = config.CarrierLabel(status.Carrier)
 		}
-		if strings.TrimSpace(status.ProbeSource) == "" {
+		if strings.TrimSpace(report.ProbeSource) != "" {
 			status.ProbeSource = strings.TrimSpace(report.ProbeSource)
 		}
 		status.LastSeen = report.FinishedAt

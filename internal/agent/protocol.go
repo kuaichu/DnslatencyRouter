@@ -13,6 +13,10 @@ type ProfileJob struct {
 
 type JobResponse struct {
 	ServerTime         time.Time    `json:"serverTime"`
+	AgentName          string       `json:"agentName,omitempty"`
+	AgentProbeSource   string       `json:"agentProbeSource,omitempty"`
+	AgentCarrier       string       `json:"agentCarrier,omitempty"`
+	AgentCarrierLabel  string       `json:"agentCarrierLabel,omitempty"`
 	CheckInterval      int          `json:"checkInterval"`
 	PingMode           string       `json:"pingMode"`
 	PingPort           int          `json:"pingPort"`

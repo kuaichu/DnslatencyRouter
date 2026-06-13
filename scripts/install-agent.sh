@@ -82,7 +82,20 @@ yaml_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
 }
 
+yaml_read_agent_value() {
+  key="$1"
+  [ -f "$CONFIG_FILE" ] || return 0
+  sed -n "s/^[[:space:]]*$key:[[:space:]]*['\"]\\{0,1\\}\\([^'\"]*\\)['\"]\\{0,1\\}[[:space:]]*$/\\1/p" "$CONFIG_FILE" | head -n 1
+}
+
 host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo agent)"
+if [ -z "$AGENT_ID" ]; then AGENT_ID="$(yaml_read_agent_value id || true)"; fi
+if [ -z "$AGENT_NAME" ]; then AGENT_NAME="$(yaml_read_agent_value name || true)"; fi
+if [ -z "$PROBE_SOURCE" ]; then PROBE_SOURCE="$(yaml_read_agent_value probe_source || true)"; fi
+if [ "$CARRIER" = "auto" ]; then
+  existing_carrier="$(yaml_read_agent_value carrier || true)"
+  if [ -n "$existing_carrier" ]; then CARRIER="$existing_carrier"; fi
+fi
 if [ -z "$AGENT_ID" ]; then
   suffix="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6 || true)"
   if [ -z "$suffix" ]; then suffix="$(date +%s)"; fi
