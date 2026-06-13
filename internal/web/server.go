@@ -25,6 +25,8 @@ import (
 //go:embed dashboard.html assets/flags/*
 var templateFS embed.FS
 
+const agentInstallerURL = "https://raw.githubusercontent.com/kuaichu/DnslatencyRouter/main/scripts/install-agent.sh"
+
 // Status holds the current state exposed via API/SSE.
 type Status struct {
 	TargetDomain      string          `json:"targetDomain"`
@@ -197,6 +199,7 @@ func (s *Server) Start() {
 	mux.HandleFunc("/api/airport-profiles", s.handleAPIAirportProfiles)
 	mux.HandleFunc("/api/agent/jobs", s.handleAPIAgentJobs)
 	mux.HandleFunc("/api/agent/reports", s.handleAPIAgentReports)
+	mux.HandleFunc("/api/agent/install-command", s.handleAPIAgentInstallCommand)
 	mux.HandleFunc("/api/agent/install.sh", s.handleAPIAgentInstallScript)
 	mux.HandleFunc("/api/agent/download/linux-amd64", s.handleAPIAgentDownload)
 	mux.HandleFunc("/api/check", s.handleCheck)
@@ -647,22 +650,33 @@ func (s *Server) handleAPIAgentInstallScript(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	http.Redirect(w, r, agentInstallerURL, http.StatusTemporaryRedirect)
+}
+
+func (s *Server) handleAPIAgentInstallCommand(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	cfg, err := config.Load(s.cfgPath)
 	if err != nil {
-		http.Error(w, "load config: "+err.Error(), http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "load config: " + err.Error()})
 		return
 	}
 	token := strings.TrimSpace(cfg.Agent.Token)
 	if token == "" {
-		http.Error(w, "agent token is not configured; set it in Agent 探针 first", http.StatusConflict)
+		w.WriteHeader(http.StatusConflict)
+		writeJSON(w, map[string]string{"error": "agent token is not configured; set it in Agent 探针 first"})
 		return
 	}
 	controllerURL := publicBaseURL(r)
-	script := renderAgentInstallScript(controllerURL, token, cfg.CheckIntervalSec)
-	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(script))
+	writeJSON(w, map[string]interface{}{
+		"ok":             true,
+		"script_url":     agentInstallerURL,
+		"controller_url": controllerURL,
+		"command":        buildAgentInstallCommand(controllerURL, token, cfg.CheckIntervalSec),
+	})
 }
 
 func (s *Server) handleAPIAgentDownload(w http.ResponseWriter, r *http.Request) {
@@ -723,119 +737,22 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-func renderAgentInstallScript(controllerURL, token string, interval int) string {
+func buildAgentInstallCommand(controllerURL, token string, interval int) string {
 	if interval <= 0 {
 		interval = 300
 	}
-	return fmt.Sprintf(`#!/usr/bin/env bash
-set -euo pipefail
-
-CONTROLLER_URL=%s
-TOKEN=%s
-INSTALL_DIR="${INSTALL_DIR:-/opt/dns-latency-router-agent}"
-CONFIG_FILE="${CONFIG_FILE:-$INSTALL_DIR/agent.yaml}"
-SERVICE_NAME="${SERVICE_NAME:-dns-latency-router-agent}"
-BIN_NAME="dns-latency-router-agent"
-AGENT_ID="${AGENT_ID:-}"
-AGENT_NAME="${AGENT_NAME:-}"
-PROBE_SOURCE="${PROBE_SOURCE:-}"
-CARRIER="${CARRIER:-auto}"
-REPORT_INTERVAL="${REPORT_INTERVAL:-%d}"
-
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --id) AGENT_ID="$2"; shift 2 ;;
-    --name) AGENT_NAME="$2"; shift 2 ;;
-    --probe-source|--region) PROBE_SOURCE="$2"; shift 2 ;;
-    --carrier) CARRIER="$2"; shift 2 ;;
-    --controller) CONTROLLER_URL="$2"; shift 2 ;;
-    --interval) REPORT_INTERVAL="$2"; shift 2 ;;
-    *) echo "unknown option: $1" >&2; exit 2 ;;
-  esac
-done
-
-if [ "$(id -u)" -ne 0 ]; then
-  echo "please run as root" >&2
-  exit 1
-fi
-
-host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo agent)"
-if [ -z "$AGENT_ID" ]; then
-  suffix="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6 || true)"
-  if [ -z "$suffix" ]; then suffix="$(date +%%s)"; fi
-  AGENT_ID="dlr-$host-$suffix"
-fi
-AGENT_ID="$(printf '%%s' "$AGENT_ID" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')"
-if [ -z "$AGENT_NAME" ]; then AGENT_NAME="$host"; fi
-if [ -z "$PROBE_SOURCE" ]; then PROBE_SOURCE="$AGENT_NAME"; fi
-
-download() {
-  url="$1"
-  out="$2"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL "$url" -o "$out"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -O "$out" "$url"
-  else
-    echo "curl or wget is required" >&2
-    exit 1
-  fi
-}
-
-yaml_quote() {
-  printf "'%%s'" "$(printf '%%s' "$1" | sed "s/'/''/g")"
-}
-
-mkdir -p "$INSTALL_DIR"
-download "$CONTROLLER_URL/api/agent/download/linux-amd64" "$INSTALL_DIR/$BIN_NAME"
-chmod 0755 "$INSTALL_DIR/$BIN_NAME"
-
-{
-  echo "node_role: agent"
-  echo "agent:"
-  echo "  id: $(yaml_quote "$AGENT_ID")"
-  echo "  name: $(yaml_quote "$AGENT_NAME")"
-  echo "  controller_url: $(yaml_quote "$CONTROLLER_URL")"
-  echo "  token: $(yaml_quote "$TOKEN")"
-  echo "  probe_source: $(yaml_quote "$PROBE_SOURCE")"
-  echo "  carrier: $(yaml_quote "$CARRIER")"
-  echo "  report_interval_seconds: $REPORT_INTERVAL"
-  echo "ping_mode: icmp"
-  echo "ping_port: 443"
-  echo "ping_timeout_seconds: 5"
-  echo "ping_attempts: 4"
-} > "$CONFIG_FILE"
-chmod 0600 "$CONFIG_FILE"
-
-cat > "/etc/systemd/system/$SERVICE_NAME.service" <<UNIT
-[Unit]
-Description=DNS Latency Router Agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/$BIN_NAME $CONFIG_FILE
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME"
-sleep 2
-systemctl --no-pager --full status "$SERVICE_NAME" || true
-
-echo
-echo "Installed DNS Latency Router agent:"
-echo "  id: $AGENT_ID"
-echo "  name: $AGENT_NAME"
-echo "  controller: $CONTROLLER_URL"
-echo "Open the controller dashboard and edit region/carrier in Agent 探针."
-`, shellQuote(controllerURL), shellQuote(token), interval)
+	parts := []string{
+		"curl -fsSL",
+		shellQuote(agentInstallerURL),
+		"| bash -s --",
+		"--controller",
+		shellQuote(controllerURL),
+		"--token",
+		shellQuote(token),
+		"--interval",
+		shellQuote(fmt.Sprintf("%d", interval)),
+	}
+	return strings.Join(parts, " ")
 }
 
 func (s *Server) agentAuthorized(r *http.Request) bool {
