@@ -249,6 +249,22 @@ func (s *Server) SetTimePenaltyConfig(startHour, endHour int, score float64, key
 	s.runtimeCfgMu.Unlock()
 }
 
+func (s *Server) SetGeoProxy(proxyURL string) {
+	proxyURL = strings.TrimSpace(proxyURL)
+	transport := &http.Transport{}
+	if proxyURL != "" {
+		parsed, err := url.Parse(proxyURL)
+		if err != nil {
+			log.Printf("[geo] invalid proxy_url %q, geo lookup will use direct connection: %v", proxyURL, err)
+		} else {
+			transport.Proxy = http.ProxyURL(parsed)
+		}
+	}
+	s.geoMu.Lock()
+	s.geoClient = &http.Client{Timeout: 4 * time.Second, Transport: transport}
+	s.geoMu.Unlock()
+}
+
 func (s *Server) SetProfilesCallback(cb func(*config.Config)) {
 	s.runtimeCfgMu.Lock()
 	s.onProfiles = cb
@@ -418,13 +434,9 @@ func (s *Server) GeoForIP(ip string) GeoInfo {
 	}
 	s.geoMu.RLock()
 	info, ok := s.geoCache[ip]
-	pending := s.geoPending[ip]
 	s.geoMu.RUnlock()
 	if ok {
 		return info
-	}
-	if pending {
-		return GeoInfo{IP: ip}
 	}
 	info = s.fetchGeoInfo(ip)
 	s.geoMu.Lock()
@@ -510,10 +522,20 @@ func compactGeoLabel(country, city, isp string) string {
 	return location
 }
 
+func (s *Server) geoHTTPClient() *http.Client {
+	s.geoMu.RLock()
+	client := s.geoClient
+	s.geoMu.RUnlock()
+	if client == nil {
+		return &http.Client{Timeout: 4 * time.Second}
+	}
+	return client
+}
+
 func (s *Server) fetchGeoInfo(ip string) GeoInfo {
 	info := GeoInfo{IP: ip}
 	url := fmt.Sprintf("http://ip-api.com/json/%s?lang=zh-CN&fields=status,countryCode,country,city,isp", ip)
-	resp, err := s.geoClient.Get(url)
+	resp, err := s.geoHTTPClient().Get(url)
 	if err != nil {
 		return info
 	}
@@ -1008,9 +1030,7 @@ func (s *Server) AgentReports(ttl time.Duration) []agent.Report {
 
 func (s *Server) AgentStatuses(ttl time.Duration) []AgentStatus {
 	var peers []config.AgentPeerConfig
-	var cfg *config.Config
 	if loadedCfg, err := config.Load(s.cfgPath); err == nil {
-		cfg = loadedCfg
 		peers = loadedCfg.Agents
 		if ttl <= 0 && loadedCfg.Agent.ReportTTLSeconds > 0 {
 			ttl = time.Duration(loadedCfg.Agent.ReportTTLSeconds) * time.Second
@@ -1022,38 +1042,6 @@ func (s *Server) AgentStatuses(ttl time.Duration) []AgentStatus {
 	now := time.Now()
 	cutoff := now.Add(-ttl)
 	statusesByID := make(map[string]AgentStatus, len(peers))
-	if cfg != nil && cfg.IsControllerMode() {
-		carrier := config.EffectiveCarrierFor(cfg.Carrier, cfg.ProbeSource)
-		localStatus := AgentStatus{
-			ID:           "controller",
-			Name:         "主控节点",
-			Carrier:      carrier,
-			CarrierLabel: config.CarrierLabel(carrier),
-			ProbeSource:  strings.TrimSpace(cfg.ProbeSource),
-			Status:       "online",
-		}
-		if len(cfg.AirportProfiles) > 0 {
-			localStatus.ProfileCount = len(cfg.AirportProfiles)
-		} else if cfg.TargetDomain != "" {
-			localStatus.ProfileCount = 1
-		}
-		if st, ok := s.status.Load().(*Status); ok {
-			if checkedAt, err := time.Parse(time.RFC3339, st.LastCheck); err == nil {
-				localStatus.LastSeen = checkedAt
-				localStatus.AgeSeconds = int(now.Sub(checkedAt).Seconds())
-				if localStatus.AgeSeconds < 0 {
-					localStatus.AgeSeconds = 0
-				}
-			}
-			if !st.IsRunning {
-				localStatus.Status = "stale"
-			}
-		}
-		if localStatus.LastSeen.IsZero() {
-			localStatus.LastSeen = now
-		}
-		statusesByID[localStatus.ID] = localStatus
-	}
 	for _, peer := range peers {
 		id := strings.TrimSpace(peer.ID)
 		if id == "" {

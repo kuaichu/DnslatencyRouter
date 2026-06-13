@@ -322,25 +322,31 @@ func fetchGeoForIP(ip string) web.GeoInfo {
 	return info
 }
 
+func geoInfoReady(info web.GeoInfo) bool {
+	return strings.TrimSpace(info.CountryCode) != "" ||
+		strings.TrimSpace(info.Country) != "" ||
+		strings.TrimSpace(info.City) != "" ||
+		strings.TrimSpace(info.ISP) != ""
+}
+
 func (c *switchController) geoForIP(ws *web.Server, ip string) web.GeoInfo {
+	if c.geoCache == nil {
+		c.geoCache = make(map[string]web.GeoInfo)
+	}
+	if info, ok := c.geoCache[ip]; ok && geoInfoReady(info) {
+		return info
+	}
 	if ws != nil {
 		info := ws.GeoForIP(ip)
-		if info.CountryCode != "" || info.ISP != "" {
-			if c.geoCache == nil {
-				c.geoCache = make(map[string]web.GeoInfo)
-			}
+		if geoInfoReady(info) {
 			c.geoCache[ip] = info
 		}
 		return info
 	}
-	if c.geoCache == nil {
-		c.geoCache = make(map[string]web.GeoInfo)
-	}
-	if info, ok := c.geoCache[ip]; ok {
-		return info
-	}
 	info := fetchGeoForIP(ip)
-	c.geoCache[ip] = info
+	if geoInfoReady(info) {
+		c.geoCache[ip] = info
+	}
 	return info
 }
 
@@ -522,6 +528,9 @@ func resolveProfileIPs(profile config.AirportProfile, dnsServers []string) ([]st
 }
 
 func runAirportProfiles(cfg *config.Config, ws *web.Server, sc *switchController) *cycleOutcome {
+	if !cfg.RunsLocalProbes() {
+		return runAirportProfilesFromAgents(cfg, ws, sc)
+	}
 	outcome := &cycleOutcome{}
 	for _, profile := range cfg.AirportProfiles {
 		profileStatus := runAirportProfileOnce(cfg, profile, ws, sc)
@@ -534,6 +543,25 @@ func runAirportProfiles(cfg *config.Config, ws *web.Server, sc *switchController
 				}
 			}
 		}
+	}
+	return outcome
+}
+
+func runAirportProfilesFromAgents(cfg *config.Config, ws *web.Server, sc *switchController) *cycleOutcome {
+	outcome := &cycleOutcome{}
+	now := time.Now()
+	for _, profile := range cfg.AirportProfiles {
+		profileStatus := baseProfileStatus(profile)
+		profileStatus.Regions = make([]web.RegionStatus, 0)
+		profileStatus.DiscoveredCount = 0
+		profileStatus.Regions = append(profileStatus.Regions, runAgentRegionRecordDecisions(cfg, profile, ws, sc, now)...)
+		for _, region := range profileStatus.Regions {
+			profileStatus.DiscoveredCount += region.CandidateCount
+			if outcome.ActiveIP == "" && region.CurrentIP != "" {
+				outcome.ActiveIP = region.CurrentIP
+			}
+		}
+		outcome.Profiles = append(outcome.Profiles, profileStatus)
 	}
 	return outcome
 }
@@ -737,11 +765,12 @@ func runAgentRegionRecordDecisions(cfg *config.Config, profile config.AirportPro
 		return nil
 	}
 	localCarrier := config.EffectiveCarrierFor(profile.Carrier, profile.ProbeSource)
+	skipLocalCarrier := cfg.RunsLocalProbes()
 	ttl := time.Duration(cfg.Agent.ReportTTLSeconds) * time.Second
 	latestByCarrier := make(map[string]agent.Report)
 	for _, report := range ws.AgentReports(ttl) {
 		carrier := config.NormalizeCarrier(report.Carrier)
-		if carrier == "" || carrier == "auto" || carrier == "all" || carrier == localCarrier {
+		if carrier == "" || carrier == "auto" || carrier == "all" || (skipLocalCarrier && carrier == localCarrier) {
 			continue
 		}
 		prev, ok := latestByCarrier[carrier]
@@ -1415,6 +1444,7 @@ func main() {
 		})
 		ws.SetSafeguards(cfg.FailedOrphanTTLHours, cfg.FallbackBaselineIP, cfg.AlertWebhookURL)
 		ws.SetTimePenaltyConfig(cfg.TimePenaltyStartHour, cfg.TimePenaltyEndHour, cfg.TimePenaltyScore, cfg.TimePenaltyOrgKeywords)
+		ws.SetGeoProxy(cfg.ProxyURL)
 		ws.Start()
 		ws.WaitReady()
 		log.SetOutput(ws.LogWriter())

@@ -559,6 +559,10 @@ func (c *Config) IsControllerMode() bool {
 	return role == "controller" || role == "standalone"
 }
 
+func (c *Config) RunsLocalProbes() bool {
+	return NormalizeNodeRole(c.NodeRole) == "standalone"
+}
+
 func (c *Config) LegacyProfile() AirportProfile {
 	slug := "default"
 	if c.CustomDomain != "" {
