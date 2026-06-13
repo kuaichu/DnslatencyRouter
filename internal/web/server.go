@@ -780,6 +780,23 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
+func concreteAgentCarrier(value string) string {
+	carrier := config.NormalizeCarrier(value)
+	switch carrier {
+	case "unicom", "telecom", "mobile":
+		return carrier
+	default:
+		return ""
+	}
+}
+
+func agentCarrierLabel(carrier string) string {
+	if carrier := concreteAgentCarrier(carrier); carrier != "" {
+		return config.CarrierLabel(carrier)
+	}
+	return "未知运营商"
+}
+
 func buildAgentInstallCommand(controllerURL, token string, interval int) string {
 	if interval <= 0 {
 		interval = 300
@@ -849,13 +866,10 @@ func (s *Server) handleAPIAgentJobs(w http.ResponseWriter, r *http.Request) {
 	agentCarrier := ""
 	agentCarrierLabel := ""
 	if peerFound {
-		agentCarrier = config.NormalizeCarrier(peer.Carrier)
-	}
-	if peerFound && agentCarrier == "" {
-		agentCarrier = "auto"
-	}
-	if peerFound {
-		agentCarrierLabel = config.EffectiveCarrierLabelFor(agentCarrier, agentProbeSource)
+		agentCarrier = concreteAgentCarrier(peer.Carrier)
+		if agentCarrier != "" {
+			agentCarrierLabel = config.CarrierLabel(agentCarrier)
+		}
 	}
 	profiles := cfg.AirportProfiles
 	if len(profiles) == 0 && cfg.TargetDomain != "" {
@@ -930,6 +944,7 @@ func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cfg, err := config.Load(s.cfgPath); err == nil {
+		authorizedCarrier := ""
 		for _, peer := range cfg.Agents {
 			if !strings.EqualFold(strings.TrimSpace(peer.ID), report.AgentID) {
 				continue
@@ -940,16 +955,20 @@ func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
 			if source := strings.TrimSpace(peer.ProbeSource); source != "" {
 				report.ProbeSource = source
 			}
-			if carrier := config.NormalizeCarrier(peer.Carrier); carrier != "" && carrier != "auto" {
+			if carrier := concreteAgentCarrier(peer.Carrier); carrier != "" {
+				authorizedCarrier = carrier
 				report.Carrier = carrier
 				report.CarrierLabel = config.CarrierLabel(carrier)
 			}
 			break
 		}
-	}
-	report.Carrier = config.NormalizeCarrier(report.Carrier)
-	if report.CarrierLabel == "" {
-		report.CarrierLabel = config.CarrierLabel(report.Carrier)
+		if authorizedCarrier == "" {
+			report.Carrier = ""
+			report.CarrierLabel = agentCarrierLabel("")
+		}
+	} else {
+		report.Carrier = ""
+		report.CarrierLabel = agentCarrierLabel("")
 	}
 	if report.FinishedAt.IsZero() {
 		report.FinishedAt = time.Now()
@@ -983,20 +1002,25 @@ func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
 
 func agentSamplesFromReport(report agent.Report) []IPSample {
 	samples := make([]IPSample, 0)
-	region := "carrier-" + report.Carrier
+	carrier := concreteAgentCarrier(report.Carrier)
+	carrierLabel := agentCarrierLabel(carrier)
+	region := "agent-unknown"
+	if carrier != "" {
+		region = "carrier-" + carrier
+	}
 	for _, profile := range report.Profiles {
 		for _, result := range profile.Results {
 			sample := IPSample{
 				Time:         report.FinishedAt,
 				AgentID:      report.AgentID,
 				AgentName:    report.AgentName,
-				Carrier:      report.Carrier,
-				CarrierLabel: report.CarrierLabel,
+				Carrier:      carrier,
+				CarrierLabel: carrierLabel,
 				ProbeSource:  report.ProbeSource,
 				ProfileID:    profile.ProfileID,
 				ProfileName:  profile.ProfileName,
 				Region:       region,
-				RegionLabel:  report.CarrierLabel,
+				RegionLabel:  carrierLabel,
 				IP:           result.IP,
 				Latency:      result.Latency,
 				Jitter:       result.Jitter,
@@ -1054,12 +1078,12 @@ func (s *Server) AgentStatuses(ttl time.Duration) []AgentStatus {
 		if name == "" {
 			name = id
 		}
-		carrier := config.NormalizeCarrier(peer.Carrier)
+		carrier := concreteAgentCarrier(peer.Carrier)
 		statusesByID[id] = AgentStatus{
 			ID:           id,
 			Name:         name,
 			Carrier:      carrier,
-			CarrierLabel: config.CarrierLabel(carrier),
+			CarrierLabel: agentCarrierLabel(carrier),
 			ProbeSource:  strings.TrimSpace(peer.ProbeSource),
 			Status:       "offline",
 		}
@@ -1079,18 +1103,10 @@ func (s *Server) AgentStatuses(ttl time.Duration) []AgentStatus {
 		if strings.TrimSpace(status.Name) == "" {
 			status.Name = id
 		}
-		if strings.TrimSpace(status.Carrier) == "" || strings.EqualFold(status.Carrier, "auto") {
-			if strings.TrimSpace(report.Carrier) != "" {
-				status.Carrier = config.NormalizeCarrier(report.Carrier)
-			}
-		}
-		if strings.TrimSpace(status.CarrierLabel) == "" || strings.EqualFold(status.Carrier, "auto") {
-			if strings.TrimSpace(report.CarrierLabel) != "" {
-				status.CarrierLabel = report.CarrierLabel
-			} else if strings.TrimSpace(status.Carrier) != "" {
-				status.CarrierLabel = config.CarrierLabel(status.Carrier)
-			}
-		} else if strings.TrimSpace(status.Carrier) != "" {
+		status.Carrier = concreteAgentCarrier(status.Carrier)
+		if strings.TrimSpace(status.CarrierLabel) == "" || status.Carrier == "" {
+			status.CarrierLabel = agentCarrierLabel(status.Carrier)
+		} else {
 			status.CarrierLabel = config.CarrierLabel(status.Carrier)
 		}
 		if strings.TrimSpace(status.ProbeSource) == "" && strings.TrimSpace(report.ProbeSource) != "" {
