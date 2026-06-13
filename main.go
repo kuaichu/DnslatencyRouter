@@ -688,6 +688,23 @@ func carrierRecordRegion(carrier string) string {
 	return "carrier-" + config.NormalizeCarrier(carrier)
 }
 
+func carrierEntryRecordFor(cfg *config.Config, profile config.AirportProfile, carrier string) config.RegionRecord {
+	carrier = config.NormalizeCarrier(carrier)
+	if rec, ok := profile.CarrierRecords[carrier]; ok {
+		if rec.Label == "" {
+			rec.Label = config.CarrierLabel(carrier)
+		}
+		if rec.CustomDomain == "" && cfg.BaseDomain != "" {
+			rec.CustomDomain = config.CarrierRecordDomain(cfg.BaseDomain, profile, carrier, "entry")
+		}
+		return rec
+	}
+	return config.RegionRecord{
+		Label:        config.CarrierLabel(carrier),
+		CustomDomain: config.CarrierRecordDomain(cfg.BaseDomain, profile, carrier, "entry"),
+	}
+}
+
 func carrierRegionRecordRegion(carrier, region string) string {
 	return "carrier-" + config.NormalizeCarrier(carrier) + "-" + config.NormalizeRegion(region)
 }
@@ -791,6 +808,12 @@ func runAgentRegionRecordDecisions(cfg *config.Config, profile config.AirportPro
 		}
 		results := checkerResultsFromAgent(profileReport.Results)
 		applyTimePenalty(cfg, sc, results, now)
+		carrierProfile := profile
+		carrierProfile.Carrier = carrier
+		carrierProfile.ProbeSource = report.ProbeSource
+		entryRec := carrierEntryRecordFor(cfg, carrierProfile, carrier)
+		statuses = append(statuses, runProfileRecordDecision(cfg, carrierProfile, carrierRecordRegion(carrier), entryRec, results, sc, now))
+
 		resultsByRegion := make(map[string][]checker.Result)
 		for _, result := range results {
 			geo := sc.geoForIP(ws, result.IP)
@@ -803,9 +826,6 @@ func runAgentRegionRecordDecisions(cfg *config.Config, profile config.AirportPro
 		if len(resultsByRegion) == 0 {
 			continue
 		}
-		carrierProfile := profile
-		carrierProfile.Carrier = carrier
-		carrierProfile.ProbeSource = report.ProbeSource
 		carrierProfile.RegionRecords = nil
 		for _, region := range sortedRegionKeys(resultsByRegion) {
 			rec := regionRecordFor(cfg, carrierProfile, region)
@@ -887,6 +907,7 @@ func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile,
 	cf := regionCloudflareClient(cfg, rec)
 	currentIP := ""
 	current := (*checker.Result)(nil)
+	recordMissing := false
 	if rec.RecordID != "" {
 		var err error
 		currentIP, err = cf.CurrentIP()
@@ -913,6 +934,7 @@ func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile,
 				return status
 			} else {
 				log.Printf("[update] [%s/%s] A record %s not found, will create it with best candidate %s", profile.ID, region, rec.CustomDomain, best.IP)
+				recordMissing = true
 			}
 		} else {
 			current = findResultByIP(results, currentIP)
@@ -944,6 +966,21 @@ func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile,
 	}
 	sc.clearRouteOutage(routeKey)
 	log.Printf("[check] [%s/%s] best candidate: %s (%s)", profile.ID, region, best.IP, describeResult(best))
+
+	if recordMissing {
+		log.Printf("[update] [%s/%s] creating %s A record -> %s", profile.ID, region, rec.CustomDomain, best.IP)
+		if err := cf.UpdateRecordByName(rec.CustomDomain, best.IP); err != nil {
+			status.Status = "update_failed"
+			log.Printf("[error] [%s/%s] cloudflare create failed: %v", profile.ID, region, err)
+			return status
+		}
+		sc.resetRoute(routeKey)
+		status.CurrentIP = best.IP
+		status.Status = "switched"
+		status.Latency = resultLatencyMs(best)
+		log.Printf("[update] [%s/%s] create applied", profile.ID, region)
+		return status
+	}
 
 	if currentIP == best.IP {
 		sc.resetRoute(routeKey)
