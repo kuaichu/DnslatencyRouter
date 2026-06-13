@@ -274,7 +274,8 @@ function findAgentReport(id){return(lastAgentReports||[]).find(report=>(report.a
 function currentViewAgent(){const agents=Array.isArray(lastStatus&&lastStatus.agents)?lastStatus.agents:[];return agents.find(agent=>(agent.id||'')===selectedAgentViewID)||agents.find(agent=>(agent.id||'')==='controller')||agents[0]||null}
 function currentViewAgentID(){const agent=currentViewAgent();return agent&&agent.id?agent.id:'controller'}
 function isControllerView(){return currentViewAgentID()==='controller'}
-function filterForAgentView(items){const id=currentViewAgentID();return(items||[]).filter(item=>isControllerView()?!(item.agentId||''):(item.agentId||'')===id)}
+function normalizeCarrierValue(v){v=String(v||'').toLowerCase().trim();return({cu:'unicom',china_unicom:'unicom','中国联通':'unicom','联通':'unicom',ct:'telecom',china_telecom:'telecom','中国电信':'telecom','电信':'telecom',cm:'mobile',china_mobile:'mobile','中国移动':'mobile','移动':'mobile',default:'all',custom:'all',global:'all','全量解析池':'all','全量':'all','全部':'all'}[v]||v)}
+function filterForAgentView(items){const id=currentViewAgentID(),agent=currentViewAgent(),carrier=normalizeCarrierValue(agent&&agent.carrier);return(items||[]).filter(item=>{if(isControllerView())return!(item.agentId||'');if((item.agentId||'')!==id)return false;const itemCarrier=normalizeCarrierValue(item.carrier);if(carrier&&carrier!=='auto'&&carrier!=='all'&&itemCarrier&&itemCarrier!==carrier)return false;return true})}
 function filterForCurrentView(items,profile){return filterForAgentView(filterForProfile(items,profile))}
 function currentProfileReport(profile){const report=findAgentReport(currentViewAgentID());if(!report||!profile)return null;return(report.profiles||[]).find(item=>item.profileId===profile.id)||null}
 function carrierPrefix(v){return({unicom:'cu',telecom:'ct',mobile:'cm',all:'all'}[String(v||'').toLowerCase()]||'auto')}
