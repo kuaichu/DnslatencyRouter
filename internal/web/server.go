@@ -1073,15 +1073,21 @@ func (s *Server) AgentStatuses(ttl time.Duration) []AgentStatus {
 		if strings.TrimSpace(status.Name) == "" {
 			status.Name = id
 		}
-		if strings.TrimSpace(report.Carrier) != "" {
-			status.Carrier = config.NormalizeCarrier(report.Carrier)
+		if strings.TrimSpace(status.Carrier) == "" || strings.EqualFold(status.Carrier, "auto") {
+			if strings.TrimSpace(report.Carrier) != "" {
+				status.Carrier = config.NormalizeCarrier(report.Carrier)
+			}
 		}
-		if strings.TrimSpace(report.CarrierLabel) != "" {
-			status.CarrierLabel = report.CarrierLabel
+		if strings.TrimSpace(status.CarrierLabel) == "" || strings.EqualFold(status.Carrier, "auto") {
+			if strings.TrimSpace(report.CarrierLabel) != "" {
+				status.CarrierLabel = report.CarrierLabel
+			} else if strings.TrimSpace(status.Carrier) != "" {
+				status.CarrierLabel = config.CarrierLabel(status.Carrier)
+			}
 		} else if strings.TrimSpace(status.Carrier) != "" {
 			status.CarrierLabel = config.CarrierLabel(status.Carrier)
 		}
-		if strings.TrimSpace(report.ProbeSource) != "" {
+		if strings.TrimSpace(status.ProbeSource) == "" && strings.TrimSpace(report.ProbeSource) != "" {
 			status.ProbeSource = strings.TrimSpace(report.ProbeSource)
 		}
 		status.LastSeen = report.FinishedAt
