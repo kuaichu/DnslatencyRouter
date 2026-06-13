@@ -149,7 +149,7 @@ dns_servers:
   - 119.29.29.29
 ```
 
-同一个二进制即可运行主控和 Agent。Agent 模式不需要 Cloudflare Token，它只拉任务和上报探测结果。
+主控和 Agent 现在是两个独立二进制：`dns-latency-router` 只运行主控，`dns-latency-router-agent` 只运行 Agent。Agent 配置必须写 `node_role: agent`，且不需要 Cloudflare Token，它只拉任务和上报探测结果。
 
 默认不是“最低 Ping 获胜”，而是综合以下指标：
 
@@ -499,6 +499,7 @@ chmod +x build.sh
 ```powershell
 go mod tidy
 go build -o dns-latency-router.exe .
+go build -o dns-latency-router-agent.exe ./cmd/dlr-agent
 .\dns-latency-router.exe
 ```
 
@@ -525,16 +526,19 @@ pm2 delete dns-latency-router
 
 ```bash
 ./dns-latency-router /path/to/config.yaml
+./dns-latency-router-agent /path/to/agent.yaml
 ```
 
 ### Release 构建产物
 
-正式 Release 通常提供两个 amd64 产物：
+正式 Release 通常提供四个 amd64 产物：
 
 - `dns-latency-router-windows-amd64.exe`
 - `dns-latency-router-linux-amd64`
+- `dns-latency-router-agent-windows-amd64.exe`
+- `dns-latency-router-agent-linux-amd64`
 
-两者都包含嵌入式 Web 仪表盘和本地 SVG 国旗资源，不需要额外拷贝 `internal/web/assets`。
+主控二进制包含嵌入式 Web 仪表盘和本地 SVG 国旗资源；Agent 二进制不包含 Web UI，只负责探测和上报。
 
 ## 代理客户端配置示例
 

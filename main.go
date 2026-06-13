@@ -1269,8 +1269,7 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 	if cfg.IsAgentMode() {
-		runAgent(cfg)
-		return
+		log.Fatalf("controller binary cannot run node_role: agent; use dns-latency-router-agent instead")
 	}
 
 	// Manual check trigger channel

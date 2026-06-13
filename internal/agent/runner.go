@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bytes"
@@ -8,15 +8,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"time"
 
-	"dns-latency-router/internal/agent"
 	"dns-latency-router/internal/checker"
 	"dns-latency-router/internal/config"
 )
 
-func runAgent(cfg *config.Config) {
+func Run(cfg *config.Config) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
@@ -25,7 +25,7 @@ func runAgent(cfg *config.Config) {
 
 	for {
 		started := time.Now()
-		job, err := fetchAgentJob(client, cfg)
+		job, err := fetchJob(client, cfg)
 		if err != nil {
 			log.Printf("[agent] fetch job failed: %v", err)
 			if waitOrStop(sigCh, 30*time.Second) {
@@ -34,8 +34,8 @@ func runAgent(cfg *config.Config) {
 			continue
 		}
 
-		report := runAgentJob(cfg, job)
-		if err := postAgentReport(client, cfg, report); err != nil {
+		report := runJob(cfg, job)
+		if err := postReport(client, cfg, report); err != nil {
 			log.Printf("[agent] report failed: %v", err)
 		} else {
 			log.Printf("[agent] report sent, profiles=%d", len(report.Profiles))
@@ -69,7 +69,7 @@ func waitOrStop(sigCh <-chan os.Signal, d time.Duration) bool {
 	}
 }
 
-func fetchAgentJob(client *http.Client, cfg *config.Config) (*agent.JobResponse, error) {
+func fetchJob(client *http.Client, cfg *config.Config) (*JobResponse, error) {
 	req, err := http.NewRequest("GET", controllerEndpoint(cfg.Agent.ControllerURL, "/api/agent/jobs"), nil)
 	if err != nil {
 		return nil, err
@@ -83,14 +83,14 @@ func fetchAgentJob(client *http.Client, cfg *config.Config) (*agent.JobResponse,
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("controller returned %s", resp.Status)
 	}
-	var job agent.JobResponse
+	var job JobResponse
 	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
 		return nil, err
 	}
 	return &job, nil
 }
 
-func postAgentReport(client *http.Client, cfg *config.Config, report agent.Report) error {
+func postReport(client *http.Client, cfg *config.Config, report Report) error {
 	body, err := json.Marshal(report)
 	if err != nil {
 		return err
@@ -112,11 +112,11 @@ func postAgentReport(client *http.Client, cfg *config.Config, report agent.Repor
 	return nil
 }
 
-func runAgentJob(cfg *config.Config, job *agent.JobResponse) agent.Report {
+func runJob(cfg *config.Config, job *JobResponse) Report {
 	started := time.Now()
 	carrier := agentCarrier(cfg)
 	source := agentProbeSource(cfg)
-	report := agent.Report{
+	report := Report{
 		AgentID:      cfg.Agent.ID,
 		AgentName:    agentName(cfg),
 		Carrier:      carrier,
@@ -126,13 +126,13 @@ func runAgentJob(cfg *config.Config, job *agent.JobResponse) agent.Report {
 	}
 
 	for _, profileJob := range job.Profiles {
-		report.Profiles = append(report.Profiles, runAgentProfileJob(cfg, job, profileJob, carrier, source))
+		report.Profiles = append(report.Profiles, runProfileJob(cfg, job, profileJob, carrier, source))
 	}
 	report.FinishedAt = time.Now()
 	return report
 }
 
-func runAgentProfileJob(cfg *config.Config, job *agent.JobResponse, profileJob agent.ProfileJob, carrier, source string) agent.ProfileReport {
+func runProfileJob(cfg *config.Config, job *JobResponse, profileJob ProfileJob, carrier, source string) ProfileReport {
 	started := time.Now()
 	profile := config.AirportProfile{
 		ID:            profileJob.ID,
@@ -145,7 +145,7 @@ func runAgentProfileJob(cfg *config.Config, job *agent.JobResponse, profileJob a
 	dnsServers := cfg.EffectiveDNSServersFor(carrier, source)
 	log.Printf("[agent] [%s] resolving from %d DNS servers as %s", profile.ID, len(dnsServers), config.CarrierLabel(carrier))
 	ips, err := resolveProfileIPs(profile, dnsServers)
-	report := agent.ProfileReport{
+	report := ProfileReport{
 		ProfileID:     profile.ID,
 		ProfileName:   profile.Name,
 		TargetDomains: append([]string(nil), profile.TargetDomains...),
@@ -182,7 +182,7 @@ func runAgentProfileJob(cfg *config.Config, job *agent.JobResponse, profileJob a
 	log.Printf("[agent] [%s] probing %d IP(s) via %s", profile.ID, len(ips), mode)
 	results := checker.PingAll(ips, mode, port, timeout, attempts, latencyWeight, jitterWeight, lossWeight)
 	for _, result := range results {
-		report.Results = append(report.Results, agentResultFromChecker(result))
+		report.Results = append(report.Results, resultFromChecker(result))
 		if result.Err != nil {
 			log.Printf("[agent] [%s] %s failed: %v", profile.ID, result.IP, result.Err)
 			continue
@@ -199,8 +199,39 @@ func runAgentProfileJob(cfg *config.Config, job *agent.JobResponse, profileJob a
 	return report
 }
 
-func agentResultFromChecker(result checker.Result) agent.Result {
-	out := agent.Result{
+func resolveProfileIPs(profile config.AirportProfile, dnsServers []string) ([]string, error) {
+	targets := profile.TargetDomains
+	if len(targets) == 0 && profile.TargetDomain != "" {
+		targets = []string{profile.TargetDomain}
+	}
+	ipSet := make(map[string]struct{})
+	var failures []string
+	for _, domain := range targets {
+		log.Printf("[agent] [%s] resolving %s from %d DNS servers ...", profile.ID, domain, len(dnsServers))
+		ips, err := checker.ResolveFromAllDNS(domain, dnsServers)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", domain, err))
+			log.Printf("[agent] [%s] dns resolve failed for %s: %v", profile.ID, domain, err)
+			continue
+		}
+		log.Printf("[agent] [%s] %s discovered %d unique IP(s): %v", profile.ID, domain, len(ips), ips)
+		for _, ip := range ips {
+			ipSet[ip] = struct{}{}
+		}
+	}
+	if len(ipSet) == 0 {
+		return nil, fmt.Errorf("all target domains failed: %s", strings.Join(failures, "; "))
+	}
+	ips := make([]string, 0, len(ipSet))
+	for ip := range ipSet {
+		ips = append(ips, ip)
+	}
+	sort.Strings(ips)
+	return ips, nil
+}
+
+func resultFromChecker(result checker.Result) Result {
+	out := Result{
 		IP:        result.IP,
 		Latency:   float64(result.Latency.Microseconds()) / 1000.0,
 		Jitter:    float64(result.Jitter.Microseconds()) / 1000.0,
