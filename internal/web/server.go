@@ -28,6 +28,9 @@ var templateFS embed.FS
 
 const agentInstallerURL = "https://raw.githubusercontent.com/kuaichu/DnslatencyRouter/main/scripts/install-agent.sh"
 
+const controllerCandidateCacheTTL = 2 * time.Minute
+const controllerCandidateEmptyCacheTTL = 30 * time.Second
+
 // Status holds the current state exposed via API/SSE.
 type Status struct {
 	TargetDomain      string          `json:"targetDomain"`
@@ -104,44 +107,52 @@ type CheckRecord struct {
 
 // Server is the web dashboard HTTP server.
 type Server struct {
-	port                 int
-	status               atomic.Value
-	history              []CheckRecord
-	historyMu            sync.Mutex
-	samples              []IPSample
-	samplesMu            sync.Mutex
-	sseClients           map[string]chan sseEvent
-	sseMu                sync.Mutex
-	sseNextID            int64
-	httpServer           *http.Server
-	readyCh              chan struct{}
-	cfgPath              string                                                                                                                                                                                                                                                                                                                                                                               // for persisting config changes
-	onConfig             func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string) // callback to notify main loop
-	onProfiles           func(*config.Config)
-	onCloudflare         func(config.CloudflareConfig)
-	triggerCh            chan<- struct{} // signal main loop to run a check immediately
-	logBuf               []LogEntry
-	logBufMu             sync.Mutex
-	logsPath             string
-	historyPath          string
-	samplesPath          string
-	activeIPs            map[string]bool
-	activeIPsByProfile   map[string]map[string]bool
-	activeIPsMu          sync.RWMutex
-	agentReports         map[string]agent.Report
-	agentReportsMu       sync.RWMutex
-	geoCache             map[string]GeoInfo
-	geoPending           map[string]bool
-	geoMu                sync.RWMutex
-	geoClient            *http.Client
-	runtimeCfgMu         sync.RWMutex
-	failedOrphanTTLHours int
-	fallbackBaselineIP   string
-	alertWebhookURL      string
-	timePenaltyStartHour int
-	timePenaltyEndHour   int
-	timePenaltyScore     float64
-	timePenaltyKeywords  string
+	port                  int
+	status                atomic.Value
+	history               []CheckRecord
+	historyMu             sync.Mutex
+	samples               []IPSample
+	samplesMu             sync.Mutex
+	sseClients            map[string]chan sseEvent
+	sseMu                 sync.Mutex
+	sseNextID             int64
+	httpServer            *http.Server
+	readyCh               chan struct{}
+	cfgPath               string                                                                                                                                                                                                                                                                                                                                                                               // for persisting config changes
+	onConfig              func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string) // callback to notify main loop
+	onProfiles            func(*config.Config)
+	onCloudflare          func(config.CloudflareConfig)
+	triggerCh             chan<- struct{} // signal main loop to run a check immediately
+	logBuf                []LogEntry
+	logBufMu              sync.Mutex
+	logsPath              string
+	historyPath           string
+	samplesPath           string
+	activeIPs             map[string]bool
+	activeIPsByProfile    map[string]map[string]bool
+	activeIPsMu           sync.RWMutex
+	controllerCandidates  map[string]controllerCandidateCacheEntry
+	controllerRefreshes   map[string]bool
+	controllerCandidateMu sync.Mutex
+	agentReports          map[string]agent.Report
+	agentReportsMu        sync.RWMutex
+	geoCache              map[string]GeoInfo
+	geoPending            map[string]bool
+	geoMu                 sync.RWMutex
+	geoClient             *http.Client
+	runtimeCfgMu          sync.RWMutex
+	failedOrphanTTLHours  int
+	fallbackBaselineIP    string
+	alertWebhookURL       string
+	timePenaltyStartHour  int
+	timePenaltyEndHour    int
+	timePenaltyScore      float64
+	timePenaltyKeywords   string
+}
+
+type controllerCandidateCacheEntry struct {
+	IPs       []string
+	ExpiresAt time.Time
 }
 
 type sseEvent struct {
@@ -163,18 +174,20 @@ type GeoInfo struct {
 // onConfig is called when the user updates target_domain or custom_domain via the web UI.
 func New(port int, cfgPath string, triggerCh chan<- struct{}, onConfig func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string)) *Server {
 	s := &Server{
-		port:               port,
-		sseClients:         make(map[string]chan sseEvent),
-		readyCh:            make(chan struct{}),
-		cfgPath:            cfgPath,
-		onConfig:           onConfig,
-		triggerCh:          triggerCh,
-		activeIPs:          make(map[string]bool),
-		activeIPsByProfile: make(map[string]map[string]bool),
-		agentReports:       make(map[string]agent.Report),
-		geoCache:           make(map[string]GeoInfo),
-		geoPending:         make(map[string]bool),
-		geoClient:          &http.Client{Timeout: 4 * time.Second},
+		port:                 port,
+		sseClients:           make(map[string]chan sseEvent),
+		readyCh:              make(chan struct{}),
+		cfgPath:              cfgPath,
+		onConfig:             onConfig,
+		triggerCh:            triggerCh,
+		activeIPs:            make(map[string]bool),
+		activeIPsByProfile:   make(map[string]map[string]bool),
+		controllerCandidates: make(map[string]controllerCandidateCacheEntry),
+		controllerRefreshes:  make(map[string]bool),
+		agentReports:         make(map[string]agent.Report),
+		geoCache:             make(map[string]GeoInfo),
+		geoPending:           make(map[string]bool),
+		geoClient:            &http.Client{Timeout: 4 * time.Second},
 	}
 	stateDir := filepath.Join(filepath.Dir(cfgPath), "data")
 	s.logsPath = filepath.Join(stateDir, "runtime-logs.jsonl")
@@ -453,6 +466,120 @@ func (s *Server) candidateIPsForProfile(profileID string) []string {
 		ips = ips[:128]
 	}
 	return ips
+}
+
+func (s *Server) controllerCandidateIPsForProfile(cfg *config.Config, profile config.AirportProfile) []string {
+	if cfg == nil {
+		return nil
+	}
+	targets := profileTargetDomains(profile)
+	if len(targets) == 0 {
+		return nil
+	}
+	servers := controllerResolveDNSServers(cfg)
+	if len(servers) == 0 {
+		return nil
+	}
+	key := controllerCandidateCacheKey(profile.ID, targets, servers)
+	now := time.Now()
+
+	s.controllerCandidateMu.Lock()
+	if entry, ok := s.controllerCandidates[key]; ok && now.Before(entry.ExpiresAt) {
+		ips := append([]string(nil), entry.IPs...)
+		s.controllerCandidateMu.Unlock()
+		return ips
+	}
+	var stale []string
+	if entry, ok := s.controllerCandidates[key]; ok {
+		stale = append([]string(nil), entry.IPs...)
+	}
+	if !s.controllerRefreshes[key] {
+		s.controllerRefreshes[key] = true
+		go s.refreshControllerCandidateIPs(profile.ID, key, append([]string(nil), targets...), append([]string(nil), servers...))
+	}
+	s.controllerCandidateMu.Unlock()
+	return stale
+}
+
+func (s *Server) refreshControllerCandidateIPs(profileID, key string, targets, servers []string) {
+	resolved := make([]string, 0)
+	for _, domain := range targets {
+		ips, err := checker.ResolveFromAllDNS(domain, servers)
+		if err != nil {
+			log.Printf("[agent] [%s] controller DNS resolve failed for %s: %v", profileID, domain, err)
+			continue
+		}
+		resolved = append(resolved, ips...)
+	}
+	resolved = checker.FilterUsableCandidateIPs(resolved)
+	sort.Strings(resolved)
+
+	ttl := controllerCandidateCacheTTL
+	if len(resolved) == 0 {
+		ttl = controllerCandidateEmptyCacheTTL
+	} else {
+		log.Printf("[agent] [%s] controller resolved %d candidate IP(s) from %d DNS server(s): %v", profileID, len(resolved), len(servers), resolved)
+	}
+	s.controllerCandidateMu.Lock()
+	s.controllerCandidates[key] = controllerCandidateCacheEntry{
+		IPs:       append([]string(nil), resolved...),
+		ExpiresAt: time.Now().Add(ttl),
+	}
+	delete(s.controllerRefreshes, key)
+	s.controllerCandidateMu.Unlock()
+}
+
+func profileTargetDomains(profile config.AirportProfile) []string {
+	targets := append([]string(nil), profile.TargetDomains...)
+	if strings.TrimSpace(profile.TargetDomain) != "" {
+		targets = append([]string{profile.TargetDomain}, targets...)
+	}
+	return dedupeNonEmptyStrings(targets)
+}
+
+func controllerResolveDNSServers(cfg *config.Config) []string {
+	servers := make([]string, 0)
+	for _, carrier := range []string{"unicom", "telecom", "mobile", "all"} {
+		servers = append(servers, cfg.EffectiveDNSServersFor(carrier, "")...)
+	}
+	return dedupeNonEmptyStrings(servers)
+}
+
+func controllerCandidateCacheKey(profileID string, targets, servers []string) string {
+	parts := []string{
+		strings.ToLower(strings.TrimSpace(profileID)),
+		strings.Join(targets, ","),
+		strings.Join(servers, ","),
+	}
+	return strings.Join(parts, "|")
+}
+
+func mergeCandidateIPLists(lists ...[]string) []string {
+	ips := make([]string, 0)
+	for _, list := range lists {
+		ips = append(ips, list...)
+	}
+	ips = checker.FilterUsableCandidateIPs(ips)
+	sort.Strings(ips)
+	return ips
+}
+
+func dedupeNonEmptyStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func filterUsableSamples(samples []IPSample) []IPSample {
@@ -1050,12 +1177,16 @@ func (s *Server) handleAPIAgentJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs := make([]agent.ProfileJob, 0, len(profiles))
 	for _, profile := range profiles {
+		candidateIPs := mergeCandidateIPLists(
+			s.controllerCandidateIPsForProfile(cfg, profile),
+			s.candidateIPsForProfile(profile.ID),
+		)
 		jobs = append(jobs, agent.ProfileJob{
 			ID:            profile.ID,
 			Name:          profile.Name,
 			Slug:          profile.Slug,
 			TargetDomains: append([]string(nil), profile.TargetDomains...),
-			CandidateIPs:  s.candidateIPsForProfile(profile.ID),
+			CandidateIPs:  candidateIPs,
 			ProbeSource:   profile.ProbeSource,
 			Carrier:       profile.Carrier,
 		})
