@@ -286,6 +286,39 @@ func (c *Client) UpdateRecordByName(name, ip string) error {
 	return nil
 }
 
+func (c *Client) DeleteRecord() error {
+	rec, err := c.GetRecord()
+	if err != nil {
+		return fmt.Errorf("get record before delete: %w", err)
+	}
+	u := fmt.Sprintf("%s/zones/%s/dns_records/%s", baseURL, c.zoneID, rec.ID)
+	if _, err := c.doRaw("DELETE", u, nil); err != nil {
+		return fmt.Errorf("delete record: %w", err)
+	}
+	if rec.ID == c.recordID {
+		c.recordID = ""
+	}
+	return nil
+}
+
+func (c *Client) DeleteRecordByName(name string) error {
+	rec, err := c.GetRecordByName(name)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			return nil
+		}
+		return fmt.Errorf("get record before delete: %w", err)
+	}
+	u := fmt.Sprintf("%s/zones/%s/dns_records/%s", baseURL, c.zoneID, rec.ID)
+	if _, err := c.doRaw("DELETE", u, nil); err != nil {
+		return fmt.Errorf("delete record %s: %w", name, err)
+	}
+	if rec.ID == c.recordID {
+		c.recordID = ""
+	}
+	return nil
+}
+
 func formatErrors(errs []apiError) string {
 	var s string
 	for i, e := range errs {

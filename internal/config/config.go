@@ -24,19 +24,33 @@ type RegionRecord struct {
 	Cloudflare   CloudflareConfig `yaml:"cloudflare"`
 }
 
+type AgentConfig struct {
+	ID                string `yaml:"id"`
+	Name              string `yaml:"name"`
+	ControllerURL     string `yaml:"controller_url"`
+	Token             string `yaml:"token"`
+	ProbeSource       string `yaml:"probe_source"`
+	Carrier           string `yaml:"carrier"`
+	ReportIntervalSec int    `yaml:"report_interval_seconds"`
+	ReportTTLSeconds  int    `yaml:"report_ttl_seconds"`
+}
+
 type AirportProfile struct {
-	ID            string                  `yaml:"id"`
-	Name          string                  `yaml:"name"`
-	Slug          string                  `yaml:"slug"`
-	TargetDomain  string                  `yaml:"target_domain,omitempty"`
-	TargetDomains []string                `yaml:"target_domains"`
-	ProbeSource   string                  `yaml:"probe_source"`
-	Carrier       string                  `yaml:"carrier"`
-	EntryRecord   RegionRecord            `yaml:"entry_record"`
-	RegionRecords map[string]RegionRecord `yaml:"region_records,omitempty"`
+	ID             string                  `yaml:"id"`
+	Name           string                  `yaml:"name"`
+	Slug           string                  `yaml:"slug"`
+	TargetDomain   string                  `yaml:"target_domain,omitempty"`
+	TargetDomains  []string                `yaml:"target_domains"`
+	ProbeSource    string                  `yaml:"probe_source"`
+	Carrier        string                  `yaml:"carrier"`
+	EntryRecord    RegionRecord            `yaml:"entry_record"`
+	RegionRecords  map[string]RegionRecord `yaml:"region_records,omitempty"`
+	CarrierRecords map[string]RegionRecord `yaml:"carrier_records,omitempty"`
 }
 
 type Config struct {
+	NodeRole               string           `yaml:"node_role"`
+	Agent                  AgentConfig      `yaml:"agent"`
 	Cloudflare             CloudflareConfig `yaml:"cloudflare"`
 	BaseDomain             string           `yaml:"base_domain"`
 	AirportProfiles        []AirportProfile `yaml:"airport_profiles"`
@@ -80,6 +94,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
+		NodeRole:               "standalone",
 		CheckIntervalSec:       300,
 		ProbeSource:            "本机网络",
 		Carrier:                "auto",
@@ -99,6 +114,10 @@ func Load(path string) (*Config, error) {
 		TimePenaltyScore:       60,
 		TimePenaltyOrgKeywords: "Google LLC",
 		WebPort:                0, // 0 = disabled
+		Agent: AgentConfig{
+			ReportIntervalSec: 300,
+			ReportTTLSeconds:  900,
+		},
 		DNSServers: []string{
 			"114.114.114.114", // China Telecom
 			"223.5.5.5",       // Alibaba (Aliyun)
@@ -120,16 +139,38 @@ func Load(path string) (*Config, error) {
 }
 
 func (cfg *Config) Normalize() error {
-	if cfg.Cloudflare.APIToken == "" {
+	cfg.NodeRole = NormalizeNodeRole(cfg.NodeRole)
+	cfg.Agent.Carrier = NormalizeCarrier(cfg.Agent.Carrier)
+	if cfg.Agent.ReportIntervalSec <= 0 {
+		cfg.Agent.ReportIntervalSec = cfg.CheckIntervalSec
+	}
+	if cfg.Agent.ReportTTLSeconds <= 0 {
+		cfg.Agent.ReportTTLSeconds = maxInt(cfg.Agent.ReportIntervalSec*3, 900)
+	}
+	if cfg.IsAgentMode() {
+		if strings.TrimSpace(cfg.Agent.ID) == "" {
+			return fmt.Errorf("agent.id is required in agent mode")
+		}
+		if strings.TrimSpace(cfg.Agent.ControllerURL) == "" {
+			return fmt.Errorf("agent.controller_url is required in agent mode")
+		}
+		if strings.TrimSpace(cfg.Agent.Token) == "" {
+			return fmt.Errorf("agent.token is required in agent mode")
+		}
+		if _, err := url.ParseRequestURI(strings.TrimSpace(cfg.Agent.ControllerURL)); err != nil {
+			return fmt.Errorf("agent.controller_url is invalid: %w", err)
+		}
+	}
+	if !cfg.IsAgentMode() && cfg.Cloudflare.APIToken == "" {
 		return fmt.Errorf("cloudflare.api_token is required")
 	}
-	if cfg.Cloudflare.ZoneID == "" && len(cfg.AirportProfiles) == 0 {
+	if !cfg.IsAgentMode() && cfg.Cloudflare.ZoneID == "" && len(cfg.AirportProfiles) == 0 {
 		return fmt.Errorf("cloudflare.zone_id is required")
 	}
-	if cfg.Cloudflare.RecordID == "" && len(cfg.AirportProfiles) == 0 {
+	if !cfg.IsAgentMode() && cfg.Cloudflare.RecordID == "" && len(cfg.AirportProfiles) == 0 {
 		return fmt.Errorf("cloudflare.record_id is required")
 	}
-	if cfg.TargetDomain == "" && len(cfg.AirportProfiles) == 0 {
+	if cfg.TargetDomain == "" && len(cfg.AirportProfiles) == 0 && !cfg.IsAgentMode() {
 		return fmt.Errorf("target_domain is required")
 	}
 	if cfg.PingAttempts < 1 {
@@ -352,6 +393,31 @@ func (c *Config) normalizeAirportProfiles() error {
 		} else {
 			p.RegionRecords = nil
 		}
+		nextCarrierRecords := make(map[string]RegionRecord, len(p.CarrierRecords))
+		for key, rec := range p.CarrierRecords {
+			carrier := NormalizeCarrier(key)
+			if carrier == "" || carrier == "auto" || carrier == "all" {
+				return fmt.Errorf("airport_profiles[%s].carrier_records has invalid carrier key %q", p.ID, key)
+			}
+			if rec.Label == "" {
+				rec.Label = CarrierLabel(carrier)
+			}
+			if rec.CustomDomain == "" && c.BaseDomain != "" {
+				rec.CustomDomain = fmt.Sprintf("%s-%s.%s", p.Slug, carrier, strings.TrimPrefix(c.BaseDomain, "."))
+			}
+			if rec.RecordID == "" {
+				rec.RecordID = rec.Cloudflare.RecordID
+			}
+			if rec.RecordID == "" && rec.CustomDomain == "" {
+				return fmt.Errorf("airport_profiles[%s].carrier_records[%s] requires record_id or custom_domain", p.ID, carrier)
+			}
+			nextCarrierRecords[carrier] = rec
+		}
+		if len(nextCarrierRecords) > 0 {
+			p.CarrierRecords = nextCarrierRecords
+		} else {
+			p.CarrierRecords = nil
+		}
 	}
 	return nil
 }
@@ -386,6 +452,15 @@ func dedupeStrings(values []string) []string {
 
 func (c *Config) HasAirportProfiles() bool {
 	return len(c.AirportProfiles) > 0
+}
+
+func (c *Config) IsAgentMode() bool {
+	return NormalizeNodeRole(c.NodeRole) == "agent"
+}
+
+func (c *Config) IsControllerMode() bool {
+	role := NormalizeNodeRole(c.NodeRole)
+	return role == "controller" || role == "standalone"
 }
 
 func (c *Config) LegacyProfile() AirportProfile {
@@ -456,6 +531,24 @@ func NormalizeCarrier(value string) string {
 	default:
 		return "auto"
 	}
+}
+
+func NormalizeNodeRole(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "agent", "probe_agent", "child", "worker", "子机":
+		return "agent"
+	case "controller", "master", "server", "host", "主机", "主控":
+		return "controller"
+	default:
+		return "standalone"
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // InferCarrier guesses the probe network from the human-readable probe source.

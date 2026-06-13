@@ -14,6 +14,7 @@
 - 支持按本地时间窗口对指定 IDC / ISP 动态加权，避免深夜抖动节点误切换
 - 支持多机场入口：每个机场可配置独立入口域名、缩写、探测源与运营商策略
 - 支持按 IP 归属地拆分地区记录，例如 `airport-a-hk.example.net`、`airport-a-my.example.net`
+- 支持主控 + Agent 子机模式：电信、联通、移动机器可在各自网络里探测并上报结果
 - Cloudflare API 支持走代理
 - Web 仪表盘支持在线修改主要配置并即时生效
 - Web 仪表盘内置全球 SVG 国旗资源，地区卡片不依赖系统 Emoji 或外部 CDN
@@ -69,6 +70,86 @@
 这个策略影响“发现哪些候选 IP”。最终是否切换，仍然由本机对这些 IP 的延迟、抖动、丢包率综合评分决定。
 
 > 注意：当前 Cloudflare 单条 A 记录只能全局指向一个 IP。这里的运营商策略是“按本探测机视角选最优 IP”，不是针对不同访客运营商分别返回不同 IP 的智能 DNS。
+
+### 主控 / Agent 模式
+
+当需要同时接入联通、电信、移动等不同运营商出口时，可以把一台机器作为主控，其他运营商机器作为 Agent 子机。Agent 不暴露端口，只主动访问主控：
+
+```text
+电信 Agent  ─┐
+联通 Agent  ─┼─>  主控 / Web / Cloudflare 更新
+移动 Agent  ─┘
+```
+
+主控负责：
+
+- 下发机场入口域名和探测参数
+- 接收各 Agent 的解析、延迟、抖动、丢包样本
+- 按 `carrier_records` 为不同运营商维护独立 Cloudflare A 记录
+- 保留原有全局 `entry_record` 和地区 `region_records` 逻辑
+
+Agent 负责：
+
+- 在本机运营商网络下解析机场入口域名
+- 对解析出的 IP 做 ICMP / TCP 探测
+- 把结果上报给主控
+
+主控配置示例：
+
+```yaml
+node_role: controller
+
+agent:
+  token: "change-this-long-random-token"
+  report_ttl_seconds: 900
+
+base_domain: "example.net"
+
+airport_profiles:
+  - id: "sntp"
+    name: "守候网络"
+    slug: "sntp"
+    target_domains:
+      - "2310lines.sntp.fun"
+    probe_source: "宁波联通"
+    carrier: "auto"
+    entry_record:
+      label: "全局最快"
+      custom_domain: "sntp-entry.example.net"
+    carrier_records:
+      unicom:
+        label: "联通最快"
+        custom_domain: "sntp-unicom.example.net"
+      telecom:
+        label: "电信最快"
+        custom_domain: "sntp-telecom.example.net"
+```
+
+电信 Agent 子机配置示例：
+
+```yaml
+node_role: agent
+
+agent:
+  id: "ct-ningbo-01"
+  name: "宁波电信 01"
+  controller_url: "http://10.0.0.234:19198"
+  token: "change-this-long-random-token"
+  probe_source: "宁波电信"
+  carrier: "telecom"
+  report_interval_seconds: 300
+
+ping_mode: icmp
+ping_port: 443
+ping_timeout_seconds: 5
+ping_attempts: 4
+dns_servers:
+  - 114.114.114.114
+  - 223.5.5.5
+  - 119.29.29.29
+```
+
+同一个二进制即可运行主控和 Agent。Agent 模式不需要 Cloudflare Token，它只拉任务和上报探测结果。
 
 默认不是“最低 Ping 获胜”，而是综合以下指标：
 

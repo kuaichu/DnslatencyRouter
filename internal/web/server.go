@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"dns-latency-router/internal/agent"
 	"dns-latency-router/internal/config"
 )
 
@@ -45,7 +46,19 @@ type Status struct {
 	LossWeight        float64         `json:"lossWeight"`
 	SwitchImprovement float64         `json:"switchImprovement"`
 	SwitchStableSec   int             `json:"switchStableSec"`
+	Agents            []AgentStatus   `json:"agents,omitempty"`
 	Profiles          []ProfileStatus `json:"profiles,omitempty"`
+}
+
+type AgentStatus struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Carrier      string    `json:"carrier"`
+	CarrierLabel string    `json:"carrierLabel"`
+	ProbeSource  string    `json:"probeSource"`
+	LastSeen     time.Time `json:"lastSeen"`
+	ProfileCount int       `json:"profileCount"`
+	Status       string    `json:"status"`
 }
 
 type ProfileStatus struct {
@@ -110,6 +123,8 @@ type Server struct {
 	activeIPs            map[string]bool
 	activeIPsByProfile   map[string]map[string]bool
 	activeIPsMu          sync.RWMutex
+	agentReports         map[string]agent.Report
+	agentReportsMu       sync.RWMutex
 	geoCache             map[string]GeoInfo
 	geoPending           map[string]bool
 	geoMu                sync.RWMutex
@@ -151,6 +166,7 @@ func New(port int, cfgPath string, triggerCh chan<- struct{}, onConfig func(targ
 		triggerCh:          triggerCh,
 		activeIPs:          make(map[string]bool),
 		activeIPsByProfile: make(map[string]map[string]bool),
+		agentReports:       make(map[string]agent.Report),
 		geoCache:           make(map[string]GeoInfo),
 		geoPending:         make(map[string]bool),
 		geoClient:          &http.Client{Timeout: 4 * time.Second},
@@ -177,6 +193,8 @@ func (s *Server) Start() {
 	mux.HandleFunc("/api/logs", s.handleAPILogs)
 	mux.HandleFunc("/api/config", s.handleAPIConfig)
 	mux.HandleFunc("/api/airport-profiles", s.handleAPIAirportProfiles)
+	mux.HandleFunc("/api/agent/jobs", s.handleAPIAgentJobs)
+	mux.HandleFunc("/api/agent/reports", s.handleAPIAgentReports)
 	mux.HandleFunc("/api/check", s.handleCheck)
 	mux.HandleFunc("/api/events", s.handleSSE)
 
@@ -619,6 +637,199 @@ func (s *Server) handleAPILogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, logs)
 }
 
+func (s *Server) agentAuthorized(r *http.Request) bool {
+	cfg, err := config.Load(s.cfgPath)
+	if err != nil {
+		return false
+	}
+	token := strings.TrimSpace(cfg.Agent.Token)
+	if token == "" {
+		return false
+	}
+	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(header), "bearer ") {
+		header = strings.TrimSpace(header[7:])
+	}
+	if header == "" {
+		header = strings.TrimSpace(r.Header.Get("X-Agent-Token"))
+	}
+	return header == token
+}
+
+func (s *Server) handleAPIAgentJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.agentAuthorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	cfg, err := config.Load(s.cfgPath)
+	if err != nil {
+		writeJSON(w, map[string]string{"error": "load config: " + err.Error()})
+		return
+	}
+	profiles := cfg.AirportProfiles
+	if len(profiles) == 0 && cfg.TargetDomain != "" {
+		profiles = []config.AirportProfile{cfg.LegacyProfile()}
+	}
+	jobs := make([]agent.ProfileJob, 0, len(profiles))
+	for _, profile := range profiles {
+		jobs = append(jobs, agent.ProfileJob{
+			ID:            profile.ID,
+			Name:          profile.Name,
+			Slug:          profile.Slug,
+			TargetDomains: append([]string(nil), profile.TargetDomains...),
+			ProbeSource:   profile.ProbeSource,
+			Carrier:       profile.Carrier,
+		})
+	}
+	writeJSON(w, agent.JobResponse{
+		ServerTime:         time.Now(),
+		CheckInterval:      cfg.CheckIntervalSec,
+		PingMode:           cfg.PingMode,
+		PingPort:           cfg.PingPort,
+		PingTimeoutSeconds: cfg.PingTimeoutSec,
+		PingAttempts:       cfg.PingAttempts,
+		LatencyWeight:      cfg.LatencyWeight,
+		JitterWeight:       cfg.JitterWeight,
+		LossWeight:         cfg.LossWeight,
+		Profiles:           jobs,
+	})
+}
+
+func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.agentAuthorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var report agent.Report
+	if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+		writeJSON(w, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	report.AgentID = strings.TrimSpace(report.AgentID)
+	if report.AgentID == "" {
+		writeJSON(w, map[string]string{"error": "agentId is required"})
+		return
+	}
+	report.Carrier = config.NormalizeCarrier(report.Carrier)
+	if report.CarrierLabel == "" {
+		report.CarrierLabel = config.CarrierLabel(report.Carrier)
+	}
+	if report.FinishedAt.IsZero() {
+		report.FinishedAt = time.Now()
+	}
+	if report.StartedAt.IsZero() {
+		report.StartedAt = report.FinishedAt
+	}
+
+	s.agentReportsMu.Lock()
+	s.agentReports[report.AgentID] = report
+	s.agentReportsMu.Unlock()
+
+	for _, profile := range report.Profiles {
+		if len(profile.ResolvedIPs) > 0 {
+			s.UpdateResolvedIPsForProfile(profile.ProfileID, profile.ResolvedIPs)
+		}
+	}
+	s.AddSamples(agentSamplesFromReport(report))
+
+	st := s.status.Load().(*Status)
+	st.Agents = s.AgentStatuses(0)
+	s.UpdateStatus(st)
+
+	select {
+	case s.triggerCh <- struct{}{}:
+	default:
+	}
+	log.Printf("[agent] report accepted from %s (%s), profiles=%d", report.AgentID, report.CarrierLabel, len(report.Profiles))
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func agentSamplesFromReport(report agent.Report) []IPSample {
+	samples := make([]IPSample, 0)
+	region := "carrier-" + report.Carrier
+	for _, profile := range report.Profiles {
+		for _, result := range profile.Results {
+			sample := IPSample{
+				Time:         report.FinishedAt,
+				AgentID:      report.AgentID,
+				AgentName:    report.AgentName,
+				Carrier:      report.Carrier,
+				CarrierLabel: report.CarrierLabel,
+				ProbeSource:  report.ProbeSource,
+				ProfileID:    profile.ProfileID,
+				ProfileName:  profile.ProfileName,
+				Region:       region,
+				RegionLabel:  report.CarrierLabel,
+				IP:           result.IP,
+				Latency:      result.Latency,
+				Jitter:       result.Jitter,
+				LossRate:     result.LossRate,
+				Score:        result.Score,
+				Success:      result.Error == "",
+				Error:        result.Error,
+			}
+			samples = append(samples, sample)
+		}
+	}
+	return samples
+}
+
+func (s *Server) AgentReports(ttl time.Duration) []agent.Report {
+	if ttl <= 0 {
+		ttl = 15 * time.Minute
+	}
+	cutoff := time.Now().Add(-ttl)
+	s.agentReportsMu.RLock()
+	defer s.agentReportsMu.RUnlock()
+	reports := make([]agent.Report, 0, len(s.agentReports))
+	for _, report := range s.agentReports {
+		if !report.FinishedAt.IsZero() && report.FinishedAt.Before(cutoff) {
+			continue
+		}
+		reports = append(reports, report)
+	}
+	return reports
+}
+
+func (s *Server) AgentStatuses(ttl time.Duration) []AgentStatus {
+	if ttl <= 0 {
+		if cfg, err := config.Load(s.cfgPath); err == nil && cfg.Agent.ReportTTLSeconds > 0 {
+			ttl = time.Duration(cfg.Agent.ReportTTLSeconds) * time.Second
+		} else {
+			ttl = 15 * time.Minute
+		}
+	}
+	cutoff := time.Now().Add(-ttl)
+	s.agentReportsMu.RLock()
+	defer s.agentReportsMu.RUnlock()
+	statuses := make([]AgentStatus, 0, len(s.agentReports))
+	for _, report := range s.agentReports {
+		state := "online"
+		if !report.FinishedAt.IsZero() && report.FinishedAt.Before(cutoff) {
+			state = "stale"
+		}
+		statuses = append(statuses, AgentStatus{
+			ID:           report.AgentID,
+			Name:         report.AgentName,
+			Carrier:      report.Carrier,
+			CarrierLabel: report.CarrierLabel,
+			ProbeSource:  report.ProbeSource,
+			LastSeen:     report.FinishedAt,
+			ProfileCount: len(report.Profiles),
+			Status:       state,
+		})
+	}
+	return statuses
+}
+
 type airportProfilesResponse struct {
 	BaseDomain string                  `json:"base_domain"`
 	Profiles   []airportProfilePayload `json:"airport_profiles"`
@@ -720,13 +931,15 @@ func (s *Server) handleAPIAirportProfiles(w http.ResponseWriter, r *http.Request
 			entry.Label = "全局最快"
 		}
 		profile := config.AirportProfile{
-			ID:            id,
-			Name:          name,
-			Slug:          slug,
-			TargetDomains: incoming.TargetDomains,
-			ProbeSource:   strings.TrimSpace(incoming.ProbeSource),
-			Carrier:       config.NormalizeCarrier(incoming.Carrier),
-			EntryRecord:   entry,
+			ID:             id,
+			Name:           name,
+			Slug:           slug,
+			TargetDomains:  incoming.TargetDomains,
+			ProbeSource:    strings.TrimSpace(incoming.ProbeSource),
+			Carrier:        config.NormalizeCarrier(incoming.Carrier),
+			EntryRecord:    entry,
+			RegionRecords:  prev.RegionRecords,
+			CarrierRecords: prev.CarrierRecords,
 		}
 		if len(profile.TargetDomains) == 0 {
 			writeJSON(w, map[string]string{"error": fmt.Sprintf("airport_profiles[%d] 至少需要一个入口域名", i+1)})
@@ -775,7 +988,7 @@ func (s *Server) handleAPIAirportProfiles(w http.ResponseWriter, r *http.Request
 func buildProfileStatuses(cfg *config.Config) []ProfileStatus {
 	profiles := make([]ProfileStatus, 0, len(cfg.AirportProfiles))
 	for _, profile := range cfg.AirportProfiles {
-		regions := make([]RegionStatus, 0, len(profile.RegionRecords)+1)
+		regions := make([]RegionStatus, 0, len(profile.RegionRecords)+len(profile.CarrierRecords)+1)
 		if profile.EntryRecord.CustomDomain != "" || profile.EntryRecord.RecordID != "" {
 			label := profile.EntryRecord.Label
 			if label == "" {
@@ -785,6 +998,18 @@ func buildProfileStatuses(cfg *config.Config) []ProfileStatus {
 				Region:       "entry",
 				Label:        label,
 				CustomDomain: profile.EntryRecord.CustomDomain,
+				Status:       "no_candidate",
+			})
+		}
+		for carrier, rec := range profile.CarrierRecords {
+			label := rec.Label
+			if label == "" {
+				label = config.CarrierLabel(carrier)
+			}
+			regions = append(regions, RegionStatus{
+				Region:       "carrier-" + carrier,
+				Label:        label,
+				CustomDomain: rec.CustomDomain,
 				Status:       "no_candidate",
 			})
 		}

@@ -25,22 +25,32 @@ type LogEntry struct {
 }
 
 type IPSample struct {
-	Time        time.Time `json:"time"`
-	ProfileID   string    `json:"profileId,omitempty"`
-	ProfileName string    `json:"profileName,omitempty"`
-	Region      string    `json:"region,omitempty"`
-	RegionLabel string    `json:"regionLabel,omitempty"`
-	IP          string    `json:"ip"`
-	Latency     float64   `json:"latency"`
-	Jitter      float64   `json:"jitter"`
-	LossRate    float64   `json:"lossRate"`
-	Score       float64   `json:"score"`
-	Success     bool      `json:"success"`
-	Error       string    `json:"error,omitempty"`
+	Time         time.Time `json:"time"`
+	AgentID      string    `json:"agentId,omitempty"`
+	AgentName    string    `json:"agentName,omitempty"`
+	Carrier      string    `json:"carrier,omitempty"`
+	CarrierLabel string    `json:"carrierLabel,omitempty"`
+	ProbeSource  string    `json:"probeSource,omitempty"`
+	ProfileID    string    `json:"profileId,omitempty"`
+	ProfileName  string    `json:"profileName,omitempty"`
+	Region       string    `json:"region,omitempty"`
+	RegionLabel  string    `json:"regionLabel,omitempty"`
+	IP           string    `json:"ip"`
+	Latency      float64   `json:"latency"`
+	Jitter       float64   `json:"jitter"`
+	LossRate     float64   `json:"lossRate"`
+	Score        float64   `json:"score"`
+	Success      bool      `json:"success"`
+	Error        string    `json:"error,omitempty"`
 }
 
 type IPStat struct {
 	IP           string    `json:"ip"`
+	AgentID      string    `json:"agentId,omitempty"`
+	AgentName    string    `json:"agentName,omitempty"`
+	Carrier      string    `json:"carrier,omitempty"`
+	CarrierLabel string    `json:"carrierLabel,omitempty"`
+	ProbeSource  string    `json:"probeSource,omitempty"`
 	ProfileID    string    `json:"profileId,omitempty"`
 	ProfileName  string    `json:"profileName,omitempty"`
 	Region       string    `json:"region,omitempty"`
@@ -64,8 +74,8 @@ type IPStat struct {
 	LastError    string    `json:"lastError,omitempty"`
 }
 
-func sampleKey(profileID, region, ip string) string {
-	return profileID + "|" + region + "|" + ip
+func sampleKey(agentID, profileID, region, ip string) string {
+	return agentID + "|" + profileID + "|" + region + "|" + ip
 }
 
 func (s *Server) loadPersistedData() {
@@ -226,7 +236,7 @@ func (s *Server) pruneInactiveOrphanSamplesLocked() bool {
 		if sample.IP == "" {
 			continue
 		}
-		key := sampleKey(sample.ProfileID, sample.Region, sample.IP)
+		key := sampleKey(sample.AgentID, sample.ProfileID, sample.Region, sample.IP)
 		prev, ok := lastByIP[key]
 		if !ok || sample.Time.After(prev.Time) {
 			lastByIP[key] = sample
@@ -248,7 +258,7 @@ func (s *Server) pruneInactiveOrphanSamplesLocked() bool {
 
 	out := s.samples[:0]
 	for _, sample := range s.samples {
-		if _, drop := pruneIPs[sampleKey(sample.ProfileID, sample.Region, sample.IP)]; drop {
+		if _, drop := pruneIPs[sampleKey(sample.AgentID, sample.ProfileID, sample.Region, sample.IP)]; drop {
 			continue
 		}
 		out = append(out, sample)
@@ -277,17 +287,22 @@ func (s *Server) computeIPStats() []IPStat {
 	lossRateSum := make(map[string]float64)
 
 	for _, sample := range s.samples {
-		key := sampleKey(sample.ProfileID, sample.Region, sample.IP)
+		key := sampleKey(sample.AgentID, sample.ProfileID, sample.Region, sample.IP)
 		stat := statsMap[key]
 		if stat == nil {
 			stat = &IPStat{
-				IP:          sample.IP,
-				ProfileID:   sample.ProfileID,
-				ProfileName: sample.ProfileName,
-				Region:      sample.Region,
-				RegionLabel: sample.RegionLabel,
-				BestLatency: 0,
-				FirstSeen:   sample.Time,
+				IP:           sample.IP,
+				AgentID:      sample.AgentID,
+				AgentName:    sample.AgentName,
+				Carrier:      sample.Carrier,
+				CarrierLabel: sample.CarrierLabel,
+				ProbeSource:  sample.ProbeSource,
+				ProfileID:    sample.ProfileID,
+				ProfileName:  sample.ProfileName,
+				Region:       sample.Region,
+				RegionLabel:  sample.RegionLabel,
+				BestLatency:  0,
+				FirstSeen:    sample.Time,
 			}
 			statsMap[key] = stat
 		}
@@ -341,11 +356,11 @@ func (s *Server) computeIPStats() []IPStat {
 			stat.SuccessRate = float64(stat.SuccessCount) / float64(stat.SeenCount) * 100
 		}
 		if stat.SuccessCount > 0 {
-			stat.AvgLatency = latencySum[sampleKey(stat.ProfileID, stat.Region, stat.IP)] / float64(stat.SuccessCount)
-			stat.AvgJitter = jitterSum[sampleKey(stat.ProfileID, stat.Region, stat.IP)] / float64(stat.SuccessCount)
+			stat.AvgLatency = latencySum[sampleKey(stat.AgentID, stat.ProfileID, stat.Region, stat.IP)] / float64(stat.SuccessCount)
+			stat.AvgJitter = jitterSum[sampleKey(stat.AgentID, stat.ProfileID, stat.Region, stat.IP)] / float64(stat.SuccessCount)
 		}
 		if stat.SeenCount > 0 {
-			stat.AvgLossRate = lossRateSum[sampleKey(stat.ProfileID, stat.Region, stat.IP)] / float64(stat.SeenCount)
+			stat.AvgLossRate = lossRateSum[sampleKey(stat.AgentID, stat.ProfileID, stat.Region, stat.IP)] / float64(stat.SeenCount)
 		}
 		stats = append(stats, *stat)
 	}

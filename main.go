@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"dns-latency-router/internal/agent"
 	"dns-latency-router/internal/checker"
 	"dns-latency-router/internal/cloudflare"
 	"dns-latency-router/internal/config"
@@ -159,6 +160,51 @@ func describeResult(r *checker.Result) string {
 		r.LossRate,
 		r.Score,
 	)
+}
+
+func recordTargetLabel(rec config.RegionRecord) string {
+	if rec.CustomDomain != "" {
+		return rec.CustomDomain
+	}
+	if rec.RecordID != "" {
+		return "record " + rec.RecordID
+	}
+	return "unconfigured record"
+}
+
+func recordNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "does not exist")
+}
+
+func deleteRegionRecord(cf *cloudflare.Client, rec config.RegionRecord) error {
+	if rec.RecordID != "" {
+		return cf.DeleteRecord()
+	}
+	if rec.CustomDomain != "" {
+		return cf.DeleteRecordByName(rec.CustomDomain)
+	}
+	return fmt.Errorf("missing custom_domain and record_id")
+}
+
+func regionFailureMessage(status string) string {
+	switch status {
+	case "deleted":
+		return "all resolved candidates failed; Cloudflare A record deleted"
+	case "delete_failed":
+		return "all resolved candidates failed; Cloudflare A record delete failed"
+	case "no_candidate":
+		return "no healthy candidate"
+	case "read_failed":
+		return "Cloudflare record read failed"
+	case "update_failed":
+		return "Cloudflare record update failed"
+	default:
+		return ""
+	}
+}
+
+func isRegionFailureStatus(status string) bool {
+	return regionFailureMessage(status) != ""
 }
 
 func summarizeFailures(results []checker.Result) []string {
@@ -361,6 +407,8 @@ func applyCycleOutcome(st *web.Status, outcome *cycleOutcome) bool {
 
 	if outcome.ActiveIP != "" {
 		st.CurrentIP = outcome.ActiveIP
+	} else if outcome.Best == nil {
+		st.CurrentIP = ""
 	}
 
 	if outcome.ActiveResult != nil && outcome.ActiveResult.Err == nil {
@@ -508,6 +556,9 @@ func baseProfileStatus(profile config.AirportProfile) web.ProfileStatus {
 			Status:       "no_candidate",
 		})
 	}
+	for _, carrier := range sortedRegionKeys(profile.CarrierRecords) {
+		st.Regions = append(st.Regions, carrierRecordStatus(carrier, profile.CarrierRecords[carrier]))
+	}
 	return st
 }
 
@@ -592,6 +643,7 @@ func runAirportProfileOnce(cfg *config.Config, profile config.AirportProfile, ws
 	if profile.EntryRecord.RecordID != "" || profile.EntryRecord.CustomDomain != "" {
 		profileStatus.Regions = append(profileStatus.Regions, runProfileRecordDecision(cfg, profile, "entry", profile.EntryRecord, results, sc, now))
 	}
+	profileStatus.Regions = append(profileStatus.Regions, runCarrierRecordDecisions(cfg, profile, results, ws, sc, now)...)
 	for _, region := range sortedRegionKeys(resultsByRegion) {
 		if region == "unknown" || region == "" {
 			continue
@@ -601,6 +653,127 @@ func runAirportProfileOnce(cfg *config.Config, profile config.AirportProfile, ws
 		profileStatus.Regions = append(profileStatus.Regions, runProfileRecordDecision(cfg, profile, region, rec, regionResults, sc, now))
 	}
 	return profileStatus
+}
+
+func carrierRecordRegion(carrier string) string {
+	return "carrier-" + config.NormalizeCarrier(carrier)
+}
+
+func carrierRecordStatus(carrier string, rec config.RegionRecord) web.RegionStatus {
+	label := rec.Label
+	if label == "" {
+		label = config.CarrierLabel(carrier)
+	}
+	return web.RegionStatus{
+		Region:       carrierRecordRegion(carrier),
+		Label:        label,
+		CustomDomain: rec.CustomDomain,
+		Status:       "no_candidate",
+	}
+}
+
+func runCarrierRecordDecisions(cfg *config.Config, profile config.AirportProfile, localResults []checker.Result, ws *web.Server, sc *switchController, now time.Time) []web.RegionStatus {
+	if len(profile.CarrierRecords) == 0 {
+		return nil
+	}
+	statuses := make([]web.RegionStatus, 0, len(profile.CarrierRecords))
+	used := make(map[string]bool, len(profile.CarrierRecords))
+
+	localCarrier := config.EffectiveCarrierFor(profile.Carrier, profile.ProbeSource)
+	if rec, ok := profile.CarrierRecords[localCarrier]; ok {
+		statuses = append(statuses, runProfileRecordDecision(cfg, profile, carrierRecordRegion(localCarrier), rec, localResults, sc, now))
+		used[localCarrier] = true
+	}
+
+	if ws != nil {
+		ttl := time.Duration(cfg.Agent.ReportTTLSeconds) * time.Second
+		latestByCarrier := make(map[string]agent.Report)
+		for _, report := range ws.AgentReports(ttl) {
+			carrier := config.NormalizeCarrier(report.Carrier)
+			if _, ok := profile.CarrierRecords[carrier]; !ok {
+				continue
+			}
+			prev, ok := latestByCarrier[carrier]
+			if !ok || report.FinishedAt.After(prev.FinishedAt) {
+				latestByCarrier[carrier] = report
+			}
+		}
+		for _, carrier := range sortedRegionKeys(profile.CarrierRecords) {
+			if used[carrier] {
+				continue
+			}
+			report, ok := latestByCarrier[carrier]
+			if !ok {
+				continue
+			}
+			profileReport := findAgentProfileReport(report, profile.ID)
+			if profileReport == nil {
+				continue
+			}
+			results := checkerResultsFromAgent(profileReport.Results)
+			applyTimePenalty(cfg, sc, results, now)
+			rec := profile.CarrierRecords[carrier]
+			statuses = append(statuses, runProfileRecordDecision(cfg, profile, carrierRecordRegion(carrier), rec, results, sc, now))
+			used[carrier] = true
+		}
+	}
+
+	for _, carrier := range sortedRegionKeys(profile.CarrierRecords) {
+		if used[carrier] {
+			continue
+		}
+		statuses = append(statuses, carrierRecordStatus(carrier, profile.CarrierRecords[carrier]))
+	}
+	return statuses
+}
+
+func findAgentProfileReport(report agent.Report, profileID string) *agent.ProfileReport {
+	for i := range report.Profiles {
+		if report.Profiles[i].ProfileID == profileID {
+			return &report.Profiles[i]
+		}
+	}
+	return nil
+}
+
+func checkerResultsFromAgent(results []agent.Result) []checker.Result {
+	out := make([]checker.Result, 0, len(results))
+	for _, result := range results {
+		next := checker.Result{
+			IP:        result.IP,
+			Latency:   time.Duration(result.Latency * float64(time.Millisecond)),
+			Jitter:    time.Duration(result.Jitter * float64(time.Millisecond)),
+			LossRate:  result.LossRate,
+			Attempts:  result.Attempts,
+			Successes: result.Successes,
+			Score:     result.Score,
+		}
+		if result.Error != "" {
+			next.Err = fmt.Errorf("%s", result.Error)
+			next.LastErr = next.Err
+		}
+		out = append(out, next)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ri, rj := out[i], out[j]
+		if ri.Err != nil && rj.Err != nil {
+			return ri.IP < rj.IP
+		}
+		if ri.Err != nil {
+			return false
+		}
+		if rj.Err != nil {
+			return true
+		}
+		if ri.Score != rj.Score {
+			return ri.Score < rj.Score
+		}
+		if ri.LossRate != rj.LossRate {
+			return ri.LossRate < rj.LossRate
+		}
+		return ri.Latency < rj.Latency
+	})
+	return out
 }
 
 func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile, region string, rec config.RegionRecord, results []checker.Result, sc *switchController, now time.Time) web.RegionStatus {
@@ -629,6 +802,11 @@ func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile,
 		var err error
 		currentIP, err = cf.CurrentIP()
 		if err != nil {
+			if best == nil && recordNotFound(err) {
+				log.Printf("[update] [%s/%s] A record %s is already absent and no healthy candidate is available", profile.ID, region, recordTargetLabel(rec))
+				status.Status = "deleted"
+				return status
+			}
 			log.Printf("[error] [%s/%s] read current Cloudflare record failed: %v", profile.ID, region, err)
 			status.Status = "read_failed"
 			return status
@@ -638,12 +816,15 @@ func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile,
 		var err error
 		currentIP, err = cf.CurrentIPByName(rec.CustomDomain)
 		if err != nil {
-			if best == nil {
+			if best == nil && recordNotFound(err) {
+				log.Printf("[update] [%s/%s] A record %s is already absent and no healthy candidate is available", profile.ID, region, rec.CustomDomain)
+			} else if best == nil {
 				log.Printf("[error] [%s/%s] read current Cloudflare record failed: %v", profile.ID, region, err)
 				status.Status = "read_failed"
 				return status
+			} else {
+				log.Printf("[update] [%s/%s] A record %s not found, will create it with best candidate %s", profile.ID, region, rec.CustomDomain, best.IP)
 			}
-			log.Printf("[update] [%s/%s] A record %s not found, will create it with best candidate %s", profile.ID, region, rec.CustomDomain, best.IP)
 		} else {
 			current = findResultByIP(results, currentIP)
 		}
@@ -657,7 +838,19 @@ func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile,
 
 	if best == nil {
 		sc.resetRoute(routeKey)
-		log.Printf("[error] [%s/%s] no healthy candidate for %s", profile.ID, region, rec.CustomDomain)
+		log.Printf("[error] [%s/%s] no healthy candidate for %s", profile.ID, region, recordTargetLabel(rec))
+		if len(results) > 0 {
+			log.Printf("[update] [%s/%s] deleting %s because all %d resolved candidate(s) failed health checks", profile.ID, region, recordTargetLabel(rec), len(results))
+			if err := deleteRegionRecord(cf, rec); err != nil {
+				status.Status = "delete_failed"
+				log.Printf("[error] [%s/%s] Cloudflare record delete failed: %v", profile.ID, region, err)
+				return status
+			}
+			status.Status = "deleted"
+			status.CurrentIP = ""
+			status.Latency = 0
+			log.Printf("[update] [%s/%s] Cloudflare A record deleted after candidate outage", profile.ID, region)
+		}
 		return status
 	}
 	sc.clearRouteOutage(routeKey)
@@ -737,6 +930,11 @@ func runCheckCycle(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, ne
 							Time: now, ProfileID: profile.ID, Region: region.Region,
 							IP: region.CurrentIP, Latency: region.Latency, Success: true,
 						})
+					} else if isRegionFailureStatus(region.Status) {
+						ws.AddHistory(web.CheckRecord{
+							Time: now, ProfileID: profile.ID, Region: region.Region,
+							Success: false, Error: regionFailureMessage(region.Status),
+						})
 					}
 				}
 			}
@@ -800,6 +998,8 @@ func applyProfileSummary(st *web.Status, profiles []web.ProfileStatus) {
 	st.Carrier = first.Carrier
 	st.CarrierLabel = first.CarrierLabel
 	st.DiscoveredCount = first.DiscoveredCount
+	st.CurrentIP = ""
+	st.Latency = 0
 	for _, profile := range profiles {
 		for _, region := range profile.Regions {
 			if st.CustomDomain == "" || profile.ID == first.ID {
@@ -952,11 +1152,21 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 					log.Printf("[fallback] baseline route applied")
 				}
 			}
+		} else if currentIP != "" {
+			log.Printf("[update] deleting %s A record because all %d resolved candidate(s) failed health checks", cfg.CustomDomain, len(results))
+			if err := cf.DeleteRecord(); err != nil {
+				log.Printf("[error] Cloudflare record delete failed: %v", err)
+			} else {
+				currentIP = ""
+				log.Printf("[update] Cloudflare A record deleted after candidate outage")
+			}
 		}
 		if sc.shouldSendAlert(time.Now()) {
 			reason := "all candidates failed; keeping current route"
 			if usingFallback {
 				reason = "all candidates failed; fallback baseline engaged"
+			} else if currentIP == "" {
+				reason = "all candidates failed; Cloudflare A record deleted"
 			}
 			sendFallbackAlert(cfg, currentIP, ips, results, reason, usingFallback)
 		}
@@ -1058,6 +1268,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+	if cfg.IsAgentMode() {
+		runAgent(cfg)
+		return
+	}
 
 	// Manual check trigger channel
 	triggerCh := make(chan struct{}, 1)
@@ -1152,6 +1366,9 @@ func main() {
 			if profile.EntryRecord.CustomDomain != "" || profile.EntryRecord.RecordID != "" {
 				verifyProfileRecord(cfg, profile.ID, "entry", profile.EntryRecord)
 			}
+			for carrier, rec := range profile.CarrierRecords {
+				verifyProfileRecord(cfg, profile.ID, carrierRecordRegion(carrier), rec)
+			}
 			for region, rec := range profile.RegionRecords {
 				verifyProfileRecord(cfg, profile.ID, region, rec)
 			}
@@ -1213,6 +1430,11 @@ func main() {
 						ws.AddHistory(web.CheckRecord{
 							Time: now, ProfileID: profile.ID, Region: region.Region,
 							IP: region.CurrentIP, Latency: region.Latency, Success: true,
+						})
+					} else if isRegionFailureStatus(region.Status) {
+						ws.AddHistory(web.CheckRecord{
+							Time: now, ProfileID: profile.ID, Region: region.Region,
+							Success: false, Error: regionFailureMessage(region.Status),
 						})
 					}
 				}
