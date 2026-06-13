@@ -907,6 +907,24 @@ func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "agentId is required"})
 		return
 	}
+	if cfg, err := config.Load(s.cfgPath); err == nil {
+		for _, peer := range cfg.Agents {
+			if !strings.EqualFold(strings.TrimSpace(peer.ID), report.AgentID) {
+				continue
+			}
+			if name := strings.TrimSpace(peer.Name); name != "" {
+				report.AgentName = name
+			}
+			if source := strings.TrimSpace(peer.ProbeSource); source != "" {
+				report.ProbeSource = source
+			}
+			if carrier := config.NormalizeCarrier(peer.Carrier); carrier != "" && carrier != "auto" {
+				report.Carrier = carrier
+				report.CarrierLabel = config.CarrierLabel(carrier)
+			}
+			break
+		}
+	}
 	report.Carrier = config.NormalizeCarrier(report.Carrier)
 	if report.CarrierLabel == "" {
 		report.CarrierLabel = config.CarrierLabel(report.Carrier)
