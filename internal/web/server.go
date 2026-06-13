@@ -669,7 +669,7 @@ func (s *Server) handleAPIAgentInstallCommand(w http.ResponseWriter, r *http.Req
 		writeJSON(w, map[string]string{"error": "agent token is not configured; set it in Agent 探针 first"})
 		return
 	}
-	controllerURL := publicBaseURL(r)
+	controllerURL := agentControllerURL(cfg, r)
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, map[string]interface{}{
 		"ok":             true,
@@ -707,6 +707,15 @@ func publicBaseURL(r *http.Request) string {
 		host = r.Host
 	}
 	return strings.TrimRight(scheme+"://"+host, "/")
+}
+
+func agentControllerURL(cfg *config.Config, r *http.Request) string {
+	if cfg != nil {
+		if configured := strings.TrimSpace(cfg.Agent.ControllerURL); configured != "" {
+			return strings.TrimRight(configured, "/")
+		}
+	}
+	return publicBaseURL(r)
 }
 
 func findAgentBinary() (string, bool) {
@@ -1312,6 +1321,7 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			"cloudflare_api_token_set":   false,
 			"cloudflare_zone_id":         "",
 			"cloudflare_record_id":       "",
+			"agent_controller_url":       "",
 			"agent_token_set":            false,
 			"agent_report_ttl_seconds":   900,
 			"agents":                     []agentPeerPayload{},
@@ -1321,6 +1331,7 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			payload["cloudflare_api_token_set"] = strings.TrimSpace(cfg.Cloudflare.APIToken) != ""
 			payload["cloudflare_zone_id"] = cfg.Cloudflare.ZoneID
 			payload["cloudflare_record_id"] = cfg.Cloudflare.RecordID
+			payload["agent_controller_url"] = cfg.Agent.ControllerURL
 			payload["agent_token_set"] = strings.TrimSpace(cfg.Agent.Token) != ""
 			payload["agent_report_ttl_seconds"] = cfg.Agent.ReportTTLSeconds
 			payload["agents"] = agentPeersToPayload(cfg.Agents)
@@ -1359,6 +1370,7 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		CloudflareAPIToken   *string             `json:"cloudflare_api_token"`
 		CloudflareZoneID     *string             `json:"cloudflare_zone_id"`
 		CloudflareRecordID   *string             `json:"cloudflare_record_id"`
+		AgentControllerURL   *string             `json:"agent_controller_url"`
 		AgentToken           *string             `json:"agent_token"`
 		AgentReportTTL       *int                `json:"agent_report_ttl_seconds"`
 		Agents               *[]agentPeerPayload `json:"agents"`
@@ -1379,6 +1391,7 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	var newLatencyWeight, newJitterWeight, newLossWeight, newSwitchImprovement, newTimePenaltyScore float64
 	var newTimePenaltyKeywords string
 	var newAgentToken string
+	var newAgentControllerURL string
 	var newAgentReportTTL int
 	var nextAgentPeers []config.AgentPeerConfig
 	hasPingPort := false
@@ -1402,6 +1415,7 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	hasCloudflareZoneID := false
 	hasCloudflareRecordID := false
 	hasAgentToken := false
+	hasAgentControllerURL := false
 	hasAgentReportTTL := false
 	hasAgentPeers := false
 
@@ -1530,6 +1544,19 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			hasAgentToken = true
 		}
 	}
+	if body.AgentControllerURL != nil {
+		candidate := strings.TrimRight(strings.TrimSpace(*body.AgentControllerURL), "/")
+		if candidate != "" {
+			if _, err := url.ParseRequestURI(candidate); err != nil {
+				writeJSON(w, map[string]string{"error": "agent_controller_url is invalid: " + err.Error()})
+				return
+			}
+		}
+		if candidate != strings.TrimRight(strings.TrimSpace(cfgForCloudflare.Agent.ControllerURL), "/") {
+			newAgentControllerURL = candidate
+			hasAgentControllerURL = true
+		}
+	}
 	if body.AgentReportTTL != nil {
 		if *body.AgentReportTTL < 30 {
 			writeJSON(w, map[string]string{"error": "agent_report_ttl_seconds must be at least 30"})
@@ -1553,7 +1580,7 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if newTarget == "" && newCustom == "" && newProbeSource == "" && !hasCarrier && !hasPingMode && !hasPingPort && !hasCheckInterval && !hasPingAttempts && !hasLatencyWeight && !hasJitterWeight && !hasLossWeight && !hasSwitchImprovement && !hasSwitchStableSec && !hasFailedOrphanTTLHours && !hasFallbackBaselineIP && !hasAlertWebhookURL && !hasTimePenaltyStartHour && !hasTimePenaltyEndHour && !hasTimePenaltyScore && !hasTimePenaltyKeywords && !hasCloudflareAPIToken && !hasCloudflareZoneID && !hasCloudflareRecordID && !hasAgentToken && !hasAgentReportTTL && !hasAgentPeers {
+	if newTarget == "" && newCustom == "" && newProbeSource == "" && !hasCarrier && !hasPingMode && !hasPingPort && !hasCheckInterval && !hasPingAttempts && !hasLatencyWeight && !hasJitterWeight && !hasLossWeight && !hasSwitchImprovement && !hasSwitchStableSec && !hasFailedOrphanTTLHours && !hasFallbackBaselineIP && !hasAlertWebhookURL && !hasTimePenaltyStartHour && !hasTimePenaltyEndHour && !hasTimePenaltyScore && !hasTimePenaltyKeywords && !hasCloudflareAPIToken && !hasCloudflareZoneID && !hasCloudflareRecordID && !hasAgentToken && !hasAgentControllerURL && !hasAgentReportTTL && !hasAgentPeers {
 		writeJSON(w, map[string]string{"error": "no changes or empty values"})
 		return
 	}
@@ -1705,7 +1732,7 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if hasCloudflareAPIToken || hasCloudflareZoneID || hasCloudflareRecordID || hasAgentToken || hasAgentReportTTL || hasAgentPeers {
+	if hasCloudflareAPIToken || hasCloudflareZoneID || hasCloudflareRecordID || hasAgentToken || hasAgentControllerURL || hasAgentReportTTL || hasAgentPeers {
 		nextCfg, err := config.Load(s.cfgPath)
 		if err != nil {
 			writeJSON(w, map[string]string{"error": "reload config: " + err.Error()})
@@ -1716,6 +1743,9 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if hasAgentToken {
 			nextCfg.Agent.Token = newAgentToken
+		}
+		if hasAgentControllerURL {
+			nextCfg.Agent.ControllerURL = newAgentControllerURL
 		}
 		if hasAgentReportTTL {
 			nextCfg.Agent.ReportTTLSeconds = newAgentReportTTL
