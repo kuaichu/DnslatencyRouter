@@ -14,7 +14,7 @@ PROBE_SOURCE="${PROBE_SOURCE:-}"
 CARRIER="${CARRIER:-auto}"
 REPORT_INTERVAL="${REPORT_INTERVAL:-300}"
 DOWNLOAD_URL="${DOWNLOAD_URL:-}"
-ALLOW_CONTROLLER_FALLBACK="${ALLOW_CONTROLLER_FALLBACK:-1}"
+ALLOW_CONTROLLER_FALLBACK="${ALLOW_CONTROLLER_FALLBACK:-0}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -97,10 +97,11 @@ trap 'rm -f "$tmp"' EXIT
 
 echo "Downloading agent from GitHub release..."
 if ! download "$DOWNLOAD_URL" "$tmp"; then
-  if [ "$ALLOW_CONTROLLER_FALLBACK" != "1" ]; then
-    echo "failed to download agent from GitHub release: $DOWNLOAD_URL" >&2
-    exit 1
-  fi
+ if [ "$ALLOW_CONTROLLER_FALLBACK" != "1" ]; then
+   echo "failed to download agent from GitHub release: $DOWNLOAD_URL" >&2
+    echo "set ALLOW_CONTROLLER_FALLBACK=1 only if you want to download the agent binary from the controller" >&2
+   exit 1
+ fi
   echo "GitHub release asset is unavailable; falling back to controller download..."
   download "$CONTROLLER_URL/api/agent/download/linux-amd64" "$tmp"
 fi
