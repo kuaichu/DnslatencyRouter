@@ -964,6 +964,13 @@ type airportProfilePayload struct {
 	Carrier       string   `json:"carrier"`
 }
 
+type agentPeerPayload struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	ProbeSource string `json:"probe_source"`
+	Carrier     string `json:"carrier"`
+}
+
 func airportProfileToPayload(profile config.AirportProfile) airportProfilePayload {
 	return airportProfilePayload{
 		ID:            profile.ID,
@@ -973,6 +980,23 @@ func airportProfileToPayload(profile config.AirportProfile) airportProfilePayloa
 		ProbeSource:   profile.ProbeSource,
 		Carrier:       profile.Carrier,
 	}
+}
+
+func agentPeerToPayload(peer config.AgentPeerConfig) agentPeerPayload {
+	return agentPeerPayload{
+		ID:          peer.ID,
+		Name:        peer.Name,
+		ProbeSource: peer.ProbeSource,
+		Carrier:     peer.Carrier,
+	}
+}
+
+func agentPeersToPayload(peers []config.AgentPeerConfig) []agentPeerPayload {
+	out := make([]agentPeerPayload, 0, len(peers))
+	for _, peer := range peers {
+		out = append(out, agentPeerToPayload(peer))
+	}
+	return out
 }
 
 func profileLookup(profiles []config.AirportProfile) map[string]config.AirportProfile {
@@ -1173,11 +1197,17 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			"cloudflare_api_token_set":   false,
 			"cloudflare_zone_id":         "",
 			"cloudflare_record_id":       "",
+			"agent_token_set":            false,
+			"agent_report_ttl_seconds":   900,
+			"agents":                     []agentPeerPayload{},
 		}
 		if cfg, err := config.Load(s.cfgPath); err == nil {
 			payload["cloudflare_api_token_set"] = strings.TrimSpace(cfg.Cloudflare.APIToken) != ""
 			payload["cloudflare_zone_id"] = cfg.Cloudflare.ZoneID
 			payload["cloudflare_record_id"] = cfg.Cloudflare.RecordID
+			payload["agent_token_set"] = strings.TrimSpace(cfg.Agent.Token) != ""
+			payload["agent_report_ttl_seconds"] = cfg.Agent.ReportTTLSeconds
+			payload["agents"] = agentPeersToPayload(cfg.Agents)
 		}
 		writeJSON(w, payload)
 		return
@@ -1189,29 +1219,32 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		TargetDomain         *string  `json:"target_domain"`
-		CustomDomain         *string  `json:"custom_domain"`
-		ProbeSource          *string  `json:"probe_source"`
-		Carrier              *string  `json:"carrier"`
-		PingMode             *string  `json:"ping_mode"`
-		PingPort             *int     `json:"ping_port"`
-		CheckInterval        *int     `json:"check_interval"`
-		PingAttempts         *int     `json:"ping_attempts"`
-		LatencyWeight        *float64 `json:"selection_latency_weight"`
-		JitterWeight         *float64 `json:"selection_jitter_weight"`
-		LossWeight           *float64 `json:"selection_loss_weight"`
-		SwitchImprovement    *float64 `json:"switch_improvement_percent"`
-		SwitchStableSec      *int     `json:"switch_stable_seconds"`
-		FailedOrphanTTLHours *int     `json:"failed_orphan_ttl_hours"`
-		FallbackBaselineIP   *string  `json:"fallback_baseline_ip"`
-		AlertWebhookURL      *string  `json:"alert_webhook_url"`
-		TimePenaltyStartHour *int     `json:"time_penalty_start_hour"`
-		TimePenaltyEndHour   *int     `json:"time_penalty_end_hour"`
-		TimePenaltyScore     *float64 `json:"time_penalty_score"`
-		TimePenaltyKeywords  *string  `json:"time_penalty_org_keywords"`
-		CloudflareAPIToken   *string  `json:"cloudflare_api_token"`
-		CloudflareZoneID     *string  `json:"cloudflare_zone_id"`
-		CloudflareRecordID   *string  `json:"cloudflare_record_id"`
+		TargetDomain         *string             `json:"target_domain"`
+		CustomDomain         *string             `json:"custom_domain"`
+		ProbeSource          *string             `json:"probe_source"`
+		Carrier              *string             `json:"carrier"`
+		PingMode             *string             `json:"ping_mode"`
+		PingPort             *int                `json:"ping_port"`
+		CheckInterval        *int                `json:"check_interval"`
+		PingAttempts         *int                `json:"ping_attempts"`
+		LatencyWeight        *float64            `json:"selection_latency_weight"`
+		JitterWeight         *float64            `json:"selection_jitter_weight"`
+		LossWeight           *float64            `json:"selection_loss_weight"`
+		SwitchImprovement    *float64            `json:"switch_improvement_percent"`
+		SwitchStableSec      *int                `json:"switch_stable_seconds"`
+		FailedOrphanTTLHours *int                `json:"failed_orphan_ttl_hours"`
+		FallbackBaselineIP   *string             `json:"fallback_baseline_ip"`
+		AlertWebhookURL      *string             `json:"alert_webhook_url"`
+		TimePenaltyStartHour *int                `json:"time_penalty_start_hour"`
+		TimePenaltyEndHour   *int                `json:"time_penalty_end_hour"`
+		TimePenaltyScore     *float64            `json:"time_penalty_score"`
+		TimePenaltyKeywords  *string             `json:"time_penalty_org_keywords"`
+		CloudflareAPIToken   *string             `json:"cloudflare_api_token"`
+		CloudflareZoneID     *string             `json:"cloudflare_zone_id"`
+		CloudflareRecordID   *string             `json:"cloudflare_record_id"`
+		AgentToken           *string             `json:"agent_token"`
+		AgentReportTTL       *int                `json:"agent_report_ttl_seconds"`
+		Agents               *[]agentPeerPayload `json:"agents"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, map[string]string{"error": "invalid JSON: " + err.Error()})
@@ -1228,6 +1261,9 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	var newTimePenaltyStartHour, newTimePenaltyEndHour int
 	var newLatencyWeight, newJitterWeight, newLossWeight, newSwitchImprovement, newTimePenaltyScore float64
 	var newTimePenaltyKeywords string
+	var newAgentToken string
+	var newAgentReportTTL int
+	var nextAgentPeers []config.AgentPeerConfig
 	hasPingPort := false
 	hasCheckInterval := false
 	hasPingMode := false
@@ -1248,6 +1284,9 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	hasCloudflareAPIToken := false
 	hasCloudflareZoneID := false
 	hasCloudflareRecordID := false
+	hasAgentToken := false
+	hasAgentReportTTL := false
+	hasAgentPeers := false
 
 	if !multiProfileMode && body.TargetDomain != nil && *body.TargetDomain != "" && *body.TargetDomain != st.TargetDomain {
 		newTarget = *body.TargetDomain
@@ -1367,8 +1406,37 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			hasCloudflareRecordID = true
 		}
 	}
+	if body.AgentToken != nil {
+		candidate := strings.TrimSpace(*body.AgentToken)
+		if candidate != "" && candidate != cfgForCloudflare.Agent.Token {
+			newAgentToken = candidate
+			hasAgentToken = true
+		}
+	}
+	if body.AgentReportTTL != nil {
+		if *body.AgentReportTTL < 30 {
+			writeJSON(w, map[string]string{"error": "agent_report_ttl_seconds must be at least 30"})
+			return
+		}
+		if *body.AgentReportTTL != cfgForCloudflare.Agent.ReportTTLSeconds {
+			newAgentReportTTL = *body.AgentReportTTL
+			hasAgentReportTTL = true
+		}
+	}
+	if body.Agents != nil {
+		hasAgentPeers = true
+		nextAgentPeers = make([]config.AgentPeerConfig, 0, len(*body.Agents))
+		for _, incoming := range *body.Agents {
+			nextAgentPeers = append(nextAgentPeers, config.AgentPeerConfig{
+				ID:          strings.TrimSpace(incoming.ID),
+				Name:        strings.TrimSpace(incoming.Name),
+				ProbeSource: strings.TrimSpace(incoming.ProbeSource),
+				Carrier:     config.NormalizeCarrier(incoming.Carrier),
+			})
+		}
+	}
 
-	if newTarget == "" && newCustom == "" && newProbeSource == "" && !hasCarrier && !hasPingMode && !hasPingPort && !hasCheckInterval && !hasPingAttempts && !hasLatencyWeight && !hasJitterWeight && !hasLossWeight && !hasSwitchImprovement && !hasSwitchStableSec && !hasFailedOrphanTTLHours && !hasFallbackBaselineIP && !hasAlertWebhookURL && !hasTimePenaltyStartHour && !hasTimePenaltyEndHour && !hasTimePenaltyScore && !hasTimePenaltyKeywords && !hasCloudflareAPIToken && !hasCloudflareZoneID && !hasCloudflareRecordID {
+	if newTarget == "" && newCustom == "" && newProbeSource == "" && !hasCarrier && !hasPingMode && !hasPingPort && !hasCheckInterval && !hasPingAttempts && !hasLatencyWeight && !hasJitterWeight && !hasLossWeight && !hasSwitchImprovement && !hasSwitchStableSec && !hasFailedOrphanTTLHours && !hasFallbackBaselineIP && !hasAlertWebhookURL && !hasTimePenaltyStartHour && !hasTimePenaltyEndHour && !hasTimePenaltyScore && !hasTimePenaltyKeywords && !hasCloudflareAPIToken && !hasCloudflareZoneID && !hasCloudflareRecordID && !hasAgentToken && !hasAgentReportTTL && !hasAgentPeers {
 		writeJSON(w, map[string]string{"error": "no changes or empty values"})
 		return
 	}
@@ -1520,18 +1588,29 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if hasCloudflareAPIToken || hasCloudflareZoneID || hasCloudflareRecordID {
+	if hasCloudflareAPIToken || hasCloudflareZoneID || hasCloudflareRecordID || hasAgentToken || hasAgentReportTTL || hasAgentPeers {
 		nextCfg, err := config.Load(s.cfgPath)
 		if err != nil {
 			writeJSON(w, map[string]string{"error": "reload config: " + err.Error()})
 			return
 		}
-		nextCfg.Cloudflare = nextCloudflare
+		if hasCloudflareAPIToken || hasCloudflareZoneID || hasCloudflareRecordID {
+			nextCfg.Cloudflare = nextCloudflare
+		}
+		if hasAgentToken {
+			nextCfg.Agent.Token = newAgentToken
+		}
+		if hasAgentReportTTL {
+			nextCfg.Agent.ReportTTLSeconds = newAgentReportTTL
+		}
+		if hasAgentPeers {
+			nextCfg.Agents = nextAgentPeers
+		}
 		if err := config.Save(s.cfgPath, nextCfg); err != nil {
-			writeJSON(w, map[string]string{"error": "persist cloudflare: " + err.Error()})
+			writeJSON(w, map[string]string{"error": "persist structured config: " + err.Error()})
 			return
 		}
-		if s.onCloudflare != nil {
+		if (hasCloudflareAPIToken || hasCloudflareZoneID || hasCloudflareRecordID) && s.onCloudflare != nil {
 			s.onCloudflare(nextCloudflare)
 		}
 	}
@@ -1702,6 +1781,9 @@ func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasSwitchStableSec {
 		st.SwitchStableSec = newSwitchStableSec
+	}
+	if hasAgentToken || hasAgentReportTTL || hasAgentPeers {
+		st.Agents = s.AgentStatuses(0)
 	}
 	s.UpdateStatus(st)
 
