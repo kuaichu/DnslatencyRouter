@@ -103,6 +103,16 @@ agent:
   token: "change-this-long-random-token"
   report_ttl_seconds: 900
 
+agents:
+  - id: "cu-ningbo-01"
+    name: "宁波联通 01"
+    probe_source: "宁波联通"
+    carrier: "unicom"
+  - id: "ct-ningbo-01"
+    name: "宁波电信 01"
+    probe_source: "宁波电信"
+    carrier: "telecom"
+
 base_domain: "example.net"
 
 airport_profiles:
@@ -150,6 +160,8 @@ dns_servers:
 ```
 
 主控和 Agent 现在是两个独立二进制：`dns-latency-router` 只运行主控，`dns-latency-router-agent` 只运行 Agent。Agent 配置必须写 `node_role: agent`，且不需要 Cloudflare Token，它只拉任务和上报探测结果。
+
+主控里的 `agents` 是预期在线的 Agent 清单。Web 仪表盘会显示本地主控节点以及这些 Agent 的在线、过期、离线状态；没有写进清单但实际发来上报的临时 Agent 也会显示出来。`agent.report_ttl_seconds` 控制远端 Agent 多久没上报后从在线变为过期。
 
 默认不是“最低 Ping 获胜”，而是综合以下指标：
 

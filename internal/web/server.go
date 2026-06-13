@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,6 +58,7 @@ type AgentStatus struct {
 	CarrierLabel string    `json:"carrierLabel"`
 	ProbeSource  string    `json:"probeSource"`
 	LastSeen     time.Time `json:"lastSeen"`
+	AgeSeconds   int       `json:"ageSeconds"`
 	ProfileCount int       `json:"profileCount"`
 	Status       string    `json:"status"`
 }
@@ -600,8 +602,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
-	st := s.status.Load().(*Status)
-	writeJSON(w, st)
+	st := *s.status.Load().(*Status)
+	st.Agents = s.AgentStatuses(0)
+	writeJSON(w, &st)
 }
 
 func (s *Server) handleAPIHistory(w http.ResponseWriter, r *http.Request) {
@@ -800,33 +803,145 @@ func (s *Server) AgentReports(ttl time.Duration) []agent.Report {
 }
 
 func (s *Server) AgentStatuses(ttl time.Duration) []AgentStatus {
-	if ttl <= 0 {
-		if cfg, err := config.Load(s.cfgPath); err == nil && cfg.Agent.ReportTTLSeconds > 0 {
-			ttl = time.Duration(cfg.Agent.ReportTTLSeconds) * time.Second
-		} else {
-			ttl = 15 * time.Minute
+	var peers []config.AgentPeerConfig
+	var cfg *config.Config
+	if loadedCfg, err := config.Load(s.cfgPath); err == nil {
+		cfg = loadedCfg
+		peers = loadedCfg.Agents
+		if ttl <= 0 && loadedCfg.Agent.ReportTTLSeconds > 0 {
+			ttl = time.Duration(loadedCfg.Agent.ReportTTLSeconds) * time.Second
 		}
 	}
-	cutoff := time.Now().Add(-ttl)
+	if ttl <= 0 {
+		ttl = 15 * time.Minute
+	}
+	now := time.Now()
+	cutoff := now.Add(-ttl)
+	statusesByID := make(map[string]AgentStatus, len(peers))
+	if cfg != nil && cfg.IsControllerMode() {
+		carrier := config.EffectiveCarrierFor(cfg.Carrier, cfg.ProbeSource)
+		localStatus := AgentStatus{
+			ID:           "controller",
+			Name:         "主控节点",
+			Carrier:      carrier,
+			CarrierLabel: config.CarrierLabel(carrier),
+			ProbeSource:  strings.TrimSpace(cfg.ProbeSource),
+			Status:       "online",
+		}
+		if len(cfg.AirportProfiles) > 0 {
+			localStatus.ProfileCount = len(cfg.AirportProfiles)
+		} else if cfg.TargetDomain != "" {
+			localStatus.ProfileCount = 1
+		}
+		if st, ok := s.status.Load().(*Status); ok {
+			if checkedAt, err := time.Parse(time.RFC3339, st.LastCheck); err == nil {
+				localStatus.LastSeen = checkedAt
+				localStatus.AgeSeconds = int(now.Sub(checkedAt).Seconds())
+				if localStatus.AgeSeconds < 0 {
+					localStatus.AgeSeconds = 0
+				}
+			}
+			if !st.IsRunning {
+				localStatus.Status = "stale"
+			}
+		}
+		if localStatus.LastSeen.IsZero() {
+			localStatus.LastSeen = now
+		}
+		statusesByID[localStatus.ID] = localStatus
+	}
+	for _, peer := range peers {
+		id := strings.TrimSpace(peer.ID)
+		if id == "" {
+			continue
+		}
+		if strings.EqualFold(id, "controller") {
+			continue
+		}
+		name := strings.TrimSpace(peer.Name)
+		if name == "" {
+			name = id
+		}
+		carrier := config.NormalizeCarrier(peer.Carrier)
+		statusesByID[id] = AgentStatus{
+			ID:           id,
+			Name:         name,
+			Carrier:      carrier,
+			CarrierLabel: config.CarrierLabel(carrier),
+			ProbeSource:  strings.TrimSpace(peer.ProbeSource),
+			Status:       "offline",
+		}
+	}
 	s.agentReportsMu.RLock()
 	defer s.agentReportsMu.RUnlock()
-	statuses := make([]AgentStatus, 0, len(s.agentReports))
 	for _, report := range s.agentReports {
-		state := "online"
-		if !report.FinishedAt.IsZero() && report.FinishedAt.Before(cutoff) {
-			state = "stale"
+		id := strings.TrimSpace(report.AgentID)
+		if id == "" {
+			continue
 		}
-		statuses = append(statuses, AgentStatus{
-			ID:           report.AgentID,
-			Name:         report.AgentName,
-			Carrier:      report.Carrier,
-			CarrierLabel: report.CarrierLabel,
-			ProbeSource:  report.ProbeSource,
-			LastSeen:     report.FinishedAt,
-			ProfileCount: len(report.Profiles),
-			Status:       state,
-		})
+		status := statusesByID[id]
+		status.ID = id
+		if strings.TrimSpace(status.Name) == "" {
+			status.Name = strings.TrimSpace(report.AgentName)
+		}
+		if strings.TrimSpace(status.Name) == "" {
+			status.Name = id
+		}
+		if strings.TrimSpace(status.Carrier) == "" || status.Carrier == "auto" {
+			status.Carrier = config.NormalizeCarrier(report.Carrier)
+		}
+		if strings.TrimSpace(status.CarrierLabel) == "" || status.CarrierLabel == config.CarrierLabel("auto") {
+			if report.CarrierLabel != "" {
+				status.CarrierLabel = report.CarrierLabel
+			} else {
+				status.CarrierLabel = config.CarrierLabel(status.Carrier)
+			}
+		}
+		if strings.TrimSpace(status.ProbeSource) == "" {
+			status.ProbeSource = strings.TrimSpace(report.ProbeSource)
+		}
+		status.LastSeen = report.FinishedAt
+		status.ProfileCount = len(report.Profiles)
+		status.AgeSeconds = 0
+		status.Status = "offline"
+		if !report.FinishedAt.IsZero() {
+			status.AgeSeconds = int(now.Sub(report.FinishedAt).Seconds())
+			if status.AgeSeconds < 0 {
+				status.AgeSeconds = 0
+			}
+			status.Status = "online"
+		}
+		if !report.FinishedAt.IsZero() && report.FinishedAt.Before(cutoff) {
+			status.Status = "stale"
+		}
+		statusesByID[id] = status
 	}
+	statuses := make([]AgentStatus, 0, len(statusesByID))
+	for _, status := range statusesByID {
+		statuses = append(statuses, status)
+	}
+	sort.Slice(statuses, func(i, j int) bool {
+		rank := func(status string) int {
+			switch status {
+			case "online":
+				return 0
+			case "stale":
+				return 1
+			default:
+				return 2
+			}
+		}
+		if rank(statuses[i].Status) != rank(statuses[j].Status) {
+			return rank(statuses[i].Status) < rank(statuses[j].Status)
+		}
+		if statuses[i].Carrier != statuses[j].Carrier {
+			return statuses[i].Carrier < statuses[j].Carrier
+		}
+		if statuses[i].Name != statuses[j].Name {
+			return statuses[i].Name < statuses[j].Name
+		}
+		return statuses[i].ID < statuses[j].ID
+	})
 	return statuses
 }
 

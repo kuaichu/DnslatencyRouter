@@ -35,6 +35,13 @@ type AgentConfig struct {
 	ReportTTLSeconds  int    `yaml:"report_ttl_seconds"`
 }
 
+type AgentPeerConfig struct {
+	ID          string `yaml:"id"`
+	Name        string `yaml:"name"`
+	ProbeSource string `yaml:"probe_source"`
+	Carrier     string `yaml:"carrier"`
+}
+
 type AirportProfile struct {
 	ID             string                  `yaml:"id"`
 	Name           string                  `yaml:"name"`
@@ -49,36 +56,37 @@ type AirportProfile struct {
 }
 
 type Config struct {
-	NodeRole               string           `yaml:"node_role"`
-	Agent                  AgentConfig      `yaml:"agent"`
-	Cloudflare             CloudflareConfig `yaml:"cloudflare"`
-	BaseDomain             string           `yaml:"base_domain"`
-	AirportProfiles        []AirportProfile `yaml:"airport_profiles"`
-	TargetDomain           string           `yaml:"target_domain"`
-	CustomDomain           string           `yaml:"custom_domain"`
-	ProbeSource            string           `yaml:"probe_source"`
-	Carrier                string           `yaml:"carrier"`
-	CheckIntervalSec       int              `yaml:"check_interval"`
-	ProxyURL               string           `yaml:"proxy_url"` // SOCKS5/HTTP proxy for Cloudflare API
-	PingMode               string           `yaml:"ping_mode"` // "icmp" or "tcp"
-	PingPort               int              `yaml:"ping_port"`
-	PingTimeoutSec         int              `yaml:"ping_timeout_seconds"`
-	PingAttempts           int              `yaml:"ping_attempts"`
-	PingMinThresholdMs     float64          `yaml:"ping_min_threshold_ms"`
-	LatencyWeight          float64          `yaml:"selection_latency_weight"`
-	JitterWeight           float64          `yaml:"selection_jitter_weight"`
-	LossWeight             float64          `yaml:"selection_loss_weight"`
-	SwitchImprovement      float64          `yaml:"switch_improvement_percent"`
-	SwitchStableSec        int              `yaml:"switch_stable_seconds"`
-	FailedOrphanTTLHours   int              `yaml:"failed_orphan_ttl_hours"`
-	FallbackBaselineIP     string           `yaml:"fallback_baseline_ip"`
-	AlertWebhookURL        string           `yaml:"alert_webhook_url"`
-	TimePenaltyStartHour   int              `yaml:"time_penalty_start_hour"`
-	TimePenaltyEndHour     int              `yaml:"time_penalty_end_hour"`
-	TimePenaltyScore       float64          `yaml:"time_penalty_score"`
-	TimePenaltyOrgKeywords string           `yaml:"time_penalty_org_keywords"`
-	DNSServers             []string         `yaml:"dns_servers"`
-	WebPort                int              `yaml:"web_port"`
+	NodeRole               string            `yaml:"node_role"`
+	Agent                  AgentConfig       `yaml:"agent"`
+	Agents                 []AgentPeerConfig `yaml:"agents"`
+	Cloudflare             CloudflareConfig  `yaml:"cloudflare"`
+	BaseDomain             string            `yaml:"base_domain"`
+	AirportProfiles        []AirportProfile  `yaml:"airport_profiles"`
+	TargetDomain           string            `yaml:"target_domain"`
+	CustomDomain           string            `yaml:"custom_domain"`
+	ProbeSource            string            `yaml:"probe_source"`
+	Carrier                string            `yaml:"carrier"`
+	CheckIntervalSec       int               `yaml:"check_interval"`
+	ProxyURL               string            `yaml:"proxy_url"` // SOCKS5/HTTP proxy for Cloudflare API
+	PingMode               string            `yaml:"ping_mode"` // "icmp" or "tcp"
+	PingPort               int               `yaml:"ping_port"`
+	PingTimeoutSec         int               `yaml:"ping_timeout_seconds"`
+	PingAttempts           int               `yaml:"ping_attempts"`
+	PingMinThresholdMs     float64           `yaml:"ping_min_threshold_ms"`
+	LatencyWeight          float64           `yaml:"selection_latency_weight"`
+	JitterWeight           float64           `yaml:"selection_jitter_weight"`
+	LossWeight             float64           `yaml:"selection_loss_weight"`
+	SwitchImprovement      float64           `yaml:"switch_improvement_percent"`
+	SwitchStableSec        int               `yaml:"switch_stable_seconds"`
+	FailedOrphanTTLHours   int               `yaml:"failed_orphan_ttl_hours"`
+	FallbackBaselineIP     string            `yaml:"fallback_baseline_ip"`
+	AlertWebhookURL        string            `yaml:"alert_webhook_url"`
+	TimePenaltyStartHour   int               `yaml:"time_penalty_start_hour"`
+	TimePenaltyEndHour     int               `yaml:"time_penalty_end_hour"`
+	TimePenaltyScore       float64           `yaml:"time_penalty_score"`
+	TimePenaltyOrgKeywords string            `yaml:"time_penalty_org_keywords"`
+	DNSServers             []string          `yaml:"dns_servers"`
+	WebPort                int               `yaml:"web_port"`
 
 	// derived
 	PingTimeout      time.Duration `yaml:"-"`
@@ -141,6 +149,9 @@ func Load(path string) (*Config, error) {
 func (cfg *Config) Normalize() error {
 	cfg.NodeRole = NormalizeNodeRole(cfg.NodeRole)
 	cfg.Agent.Carrier = NormalizeCarrier(cfg.Agent.Carrier)
+	if err := cfg.normalizeAgentPeers(); err != nil {
+		return err
+	}
 	if cfg.Agent.ReportIntervalSec <= 0 {
 		cfg.Agent.ReportIntervalSec = cfg.CheckIntervalSec
 	}
@@ -209,6 +220,35 @@ func (cfg *Config) Normalize() error {
 	cfg.PingMinThreshold = time.Duration(cfg.PingMinThresholdMs * float64(time.Millisecond))
 	cfg.FailedOrphanTTL = time.Duration(cfg.FailedOrphanTTLHours) * time.Hour
 
+	return nil
+}
+
+func (cfg *Config) normalizeAgentPeers() error {
+	seen := make(map[string]struct{}, len(cfg.Agents))
+	out := make([]AgentPeerConfig, 0, len(cfg.Agents))
+	for i := range cfg.Agents {
+		peer := cfg.Agents[i]
+		peer.ID = strings.TrimSpace(peer.ID)
+		if peer.ID == "" {
+			return fmt.Errorf("agents[%d].id is required", i)
+		}
+		if strings.EqualFold(peer.ID, "controller") {
+			return fmt.Errorf("agents[%s] uses reserved id controller", peer.ID)
+		}
+		key := strings.ToLower(peer.ID)
+		if _, ok := seen[key]; ok {
+			return fmt.Errorf("agents[%s] is duplicated", peer.ID)
+		}
+		seen[key] = struct{}{}
+		peer.Name = strings.TrimSpace(peer.Name)
+		if peer.Name == "" {
+			peer.Name = peer.ID
+		}
+		peer.ProbeSource = strings.TrimSpace(peer.ProbeSource)
+		peer.Carrier = NormalizeCarrier(peer.Carrier)
+		out = append(out, peer)
+	}
+	cfg.Agents = out
 	return nil
 }
 
