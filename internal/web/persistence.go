@@ -278,6 +278,7 @@ func (s *Server) pruneInactiveOrphanSamplesLocked() bool {
 }
 
 func (s *Server) computeIPStats() []IPStat {
+	assignments := s.agentAssignments()
 	s.samplesMu.Lock()
 	defer s.samplesMu.Unlock()
 
@@ -286,7 +287,8 @@ func (s *Server) computeIPStats() []IPStat {
 	jitterSum := make(map[string]float64)
 	lossRateSum := make(map[string]float64)
 
-	for _, sample := range s.samples {
+	for _, rawSample := range s.samples {
+		sample := normalizeIPSampleWithAssignments(rawSample, assignments)
 		key := sampleKey(sample.AgentID, sample.ProfileID, sample.Region, sample.IP)
 		stat := statsMap[key]
 		if stat == nil {

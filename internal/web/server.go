@@ -659,10 +659,14 @@ func (s *Server) handleAPIIPStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIIPSamples(w http.ResponseWriter, r *http.Request) {
+	assignments := s.agentAssignments()
 	s.samplesMu.Lock()
 	samples := make([]IPSample, len(s.samples))
 	copy(samples, s.samples)
 	s.samplesMu.Unlock()
+	for i := range samples {
+		samples[i] = normalizeIPSampleWithAssignments(samples[i], assignments)
+	}
 	writeJSON(w, samples)
 }
 
@@ -795,6 +799,81 @@ func agentCarrierLabel(carrier string) string {
 		return config.CarrierLabel(carrier)
 	}
 	return "未知运营商"
+}
+
+type agentAssignment struct {
+	Name        string
+	ProbeSource string
+	Carrier     string
+}
+
+func (s *Server) agentAssignments() map[string]agentAssignment {
+	cfg, err := config.Load(s.cfgPath)
+	if err != nil {
+		return nil
+	}
+	assignments := make(map[string]agentAssignment, len(cfg.Agents))
+	for _, peer := range cfg.Agents {
+		id := strings.ToLower(strings.TrimSpace(peer.ID))
+		if id == "" || id == "controller" {
+			continue
+		}
+		assignments[id] = agentAssignment{
+			Name:        strings.TrimSpace(peer.Name),
+			ProbeSource: strings.TrimSpace(peer.ProbeSource),
+			Carrier:     concreteAgentCarrier(peer.Carrier),
+		}
+	}
+	return assignments
+}
+
+func normalizeAgentReportWithAssignments(report agent.Report, assignments map[string]agentAssignment) agent.Report {
+	id := strings.ToLower(strings.TrimSpace(report.AgentID))
+	assignment, ok := assignments[id]
+	if ok {
+		if assignment.Name != "" {
+			report.AgentName = assignment.Name
+		}
+		if assignment.ProbeSource != "" {
+			report.ProbeSource = assignment.ProbeSource
+		}
+	}
+	if ok && assignment.Carrier != "" {
+		report.Carrier = assignment.Carrier
+		report.CarrierLabel = config.CarrierLabel(assignment.Carrier)
+		return report
+	}
+	report.Carrier = ""
+	report.CarrierLabel = agentCarrierLabel("")
+	return report
+}
+
+func normalizeIPSampleWithAssignments(sample IPSample, assignments map[string]agentAssignment) IPSample {
+	if strings.TrimSpace(sample.AgentID) == "" {
+		return sample
+	}
+	id := strings.ToLower(strings.TrimSpace(sample.AgentID))
+	assignment, ok := assignments[id]
+	if ok {
+		if assignment.Name != "" {
+			sample.AgentName = assignment.Name
+		}
+		if assignment.ProbeSource != "" {
+			sample.ProbeSource = assignment.ProbeSource
+		}
+	}
+	carrier := ""
+	if ok {
+		carrier = assignment.Carrier
+	}
+	sample.Carrier = carrier
+	sample.CarrierLabel = agentCarrierLabel(carrier)
+	sample.Region = "agent-unknown"
+	if carrier != "" {
+		sample.Region = "carrier-" + carrier
+	}
+	sample.RegionLabel = sample.CarrierLabel
+	return sample
 }
 
 func buildAgentInstallCommand(controllerURL, token string, interval int) string {
@@ -943,33 +1022,7 @@ func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "agentId is required"})
 		return
 	}
-	if cfg, err := config.Load(s.cfgPath); err == nil {
-		authorizedCarrier := ""
-		for _, peer := range cfg.Agents {
-			if !strings.EqualFold(strings.TrimSpace(peer.ID), report.AgentID) {
-				continue
-			}
-			if name := strings.TrimSpace(peer.Name); name != "" {
-				report.AgentName = name
-			}
-			if source := strings.TrimSpace(peer.ProbeSource); source != "" {
-				report.ProbeSource = source
-			}
-			if carrier := concreteAgentCarrier(peer.Carrier); carrier != "" {
-				authorizedCarrier = carrier
-				report.Carrier = carrier
-				report.CarrierLabel = config.CarrierLabel(carrier)
-			}
-			break
-		}
-		if authorizedCarrier == "" {
-			report.Carrier = ""
-			report.CarrierLabel = agentCarrierLabel("")
-		}
-	} else {
-		report.Carrier = ""
-		report.CarrierLabel = agentCarrierLabel("")
-	}
+	report = normalizeAgentReportWithAssignments(report, s.agentAssignments())
 	if report.FinishedAt.IsZero() {
 		report.FinishedAt = time.Now()
 	}
@@ -1040,6 +1093,7 @@ func (s *Server) AgentReports(ttl time.Duration) []agent.Report {
 		ttl = 15 * time.Minute
 	}
 	cutoff := time.Now().Add(-ttl)
+	assignments := s.agentAssignments()
 	s.agentReportsMu.RLock()
 	defer s.agentReportsMu.RUnlock()
 	reports := make([]agent.Report, 0, len(s.agentReports))
@@ -1047,7 +1101,7 @@ func (s *Server) AgentReports(ttl time.Duration) []agent.Report {
 		if !report.FinishedAt.IsZero() && report.FinishedAt.Before(cutoff) {
 			continue
 		}
-		reports = append(reports, report)
+		reports = append(reports, normalizeAgentReportWithAssignments(report, assignments))
 	}
 	return reports
 }
