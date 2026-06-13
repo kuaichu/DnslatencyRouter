@@ -7,6 +7,7 @@ type ProfileJob struct {
 	Name          string   `json:"name"`
 	Slug          string   `json:"slug"`
 	TargetDomains []string `json:"targetDomains"`
+	CandidateIPs  []string `json:"candidateIps,omitempty"`
 	ProbeSource   string   `json:"probeSource"`
 	Carrier       string   `json:"carrier"`
 }

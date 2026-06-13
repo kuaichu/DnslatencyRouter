@@ -393,6 +393,68 @@ func (s *Server) UpdateResolvedIPsForProfile(profileID string, ips []string) {
 	s.activeIPsMu.Unlock()
 }
 
+func (s *Server) candidateIPsForProfile(profileID string) []string {
+	seen := make(map[string]struct{})
+	add := func(value string) {
+		ip, ok := checker.NormalizeCandidateIP(value)
+		if !ok {
+			return
+		}
+		seen[ip] = struct{}{}
+	}
+
+	s.activeIPsMu.RLock()
+	if profileID != "" {
+		for ip := range s.activeIPsByProfile[profileID] {
+			add(ip)
+		}
+	} else {
+		for ip := range s.activeIPs {
+			add(ip)
+		}
+	}
+	s.activeIPsMu.RUnlock()
+
+	s.agentReportsMu.RLock()
+	for _, report := range s.agentReports {
+		for _, profile := range report.Profiles {
+			if profileID != "" && profile.ProfileID != profileID {
+				continue
+			}
+			for _, ip := range profile.ResolvedIPs {
+				add(ip)
+			}
+			for _, result := range profile.Results {
+				add(result.IP)
+			}
+		}
+	}
+	s.agentReportsMu.RUnlock()
+
+	cutoff := time.Now().Add(-24 * time.Hour)
+	s.samplesMu.Lock()
+	for _, sample := range s.samples {
+		if profileID != "" && sample.ProfileID != profileID {
+			continue
+		}
+		if !sample.Time.IsZero() && sample.Time.Before(cutoff) {
+			continue
+		}
+		add(sample.IP)
+	}
+	s.samplesMu.Unlock()
+
+	ips := make([]string, 0, len(seen))
+	for ip := range seen {
+		ips = append(ips, ip)
+	}
+	sort.Strings(ips)
+	if len(ips) > 128 {
+		ips = ips[:128]
+	}
+	return ips
+}
+
 func filterUsableSamples(samples []IPSample) []IPSample {
 	if len(samples) == 0 {
 		return nil
@@ -993,6 +1055,7 @@ func (s *Server) handleAPIAgentJobs(w http.ResponseWriter, r *http.Request) {
 			Name:          profile.Name,
 			Slug:          profile.Slug,
 			TargetDomains: append([]string(nil), profile.TargetDomains...),
+			CandidateIPs:  s.candidateIPsForProfile(profile.ID),
 			ProbeSource:   profile.ProbeSource,
 			Carrier:       profile.Carrier,
 		})

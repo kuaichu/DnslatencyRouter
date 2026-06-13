@@ -146,6 +146,7 @@ func runProfileJob(cfg *config.Config, job *JobResponse, profileJob ProfileJob, 
 		Carrier:       carrier,
 	}
 	dnsServers := cfg.EffectiveDNSServersFor(carrier, source)
+	controllerCandidates := checker.FilterUsableCandidateIPs(profileJob.CandidateIPs)
 	log.Printf("[agent] [%s] resolving from %d DNS servers as %s", profile.ID, len(dnsServers), config.CarrierLabel(carrier))
 	ips, err := resolveProfileIPs(profile, dnsServers)
 	report := ProfileReport{
@@ -155,10 +156,20 @@ func runProfileJob(cfg *config.Config, job *JobResponse, profileJob ProfileJob, 
 		StartedAt:     started,
 	}
 	if err != nil {
-		report.Error = err.Error()
-		report.FinishedAt = time.Now()
-		log.Printf("[agent] [%s] resolve failed: %v", profile.ID, err)
-		return report
+		if len(controllerCandidates) == 0 {
+			report.Error = err.Error()
+			report.FinishedAt = time.Now()
+			log.Printf("[agent] [%s] resolve failed: %v", profile.ID, err)
+			return report
+		}
+		ips = controllerCandidates
+		log.Printf("[agent] [%s] local resolve failed: %v; using %d controller candidate IP(s): %v", profile.ID, err, len(ips), ips)
+	} else {
+		merged := mergeCandidateIPs(ips, controllerCandidates)
+		if len(controllerCandidates) > 0 && len(merged) > len(ips) {
+			log.Printf("[agent] [%s] merged %d local IP(s) with %d controller candidate IP(s): %v", profile.ID, len(ips), len(controllerCandidates), merged)
+		}
+		ips = merged
 	}
 	report.ResolvedIPs = ips
 
@@ -200,6 +211,15 @@ func runProfileJob(cfg *config.Config, job *JobResponse, profileJob ProfileJob, 
 	}
 	report.FinishedAt = time.Now()
 	return report
+}
+
+func mergeCandidateIPs(primary, fallback []string) []string {
+	ips := make([]string, 0, len(primary)+len(fallback))
+	ips = append(ips, primary...)
+	ips = append(ips, fallback...)
+	ips = checker.FilterUsableCandidateIPs(ips)
+	sort.Strings(ips)
+	return ips
 }
 
 func resolveProfileIPs(profile config.AirportProfile, dnsServers []string) ([]string, error) {
