@@ -131,6 +131,7 @@ type Server struct {
 	agentReportsMu       sync.RWMutex
 	geoCache             map[string]GeoInfo
 	geoPending           map[string]bool
+	geoRetryAfter        map[string]time.Time
 	geoMu                sync.RWMutex
 	geoClient            *http.Client
 	runtimeCfgMu         sync.RWMutex
@@ -173,6 +174,7 @@ func New(port int, cfgPath string, triggerCh chan<- struct{}, onConfig func(targ
 		agentReports:       make(map[string]agent.Report),
 		geoCache:           make(map[string]GeoInfo),
 		geoPending:         make(map[string]bool),
+		geoRetryAfter:      make(map[string]time.Time),
 		geoClient:          &http.Client{Timeout: 4 * time.Second},
 	}
 	stateDir := filepath.Join(filepath.Dir(cfgPath), "data")
@@ -419,16 +421,22 @@ func (s *Server) GeoForIP(ip string) GeoInfo {
 	s.geoMu.RLock()
 	info, ok := s.geoCache[ip]
 	pending := s.geoPending[ip]
+	retryAt := s.geoRetryAfter[ip]
 	s.geoMu.RUnlock()
 	if ok {
 		return info
 	}
-	if pending {
+	if pending || time.Now().Before(retryAt) {
 		return GeoInfo{IP: ip}
 	}
 	info = s.fetchGeoInfo(ip)
 	s.geoMu.Lock()
-	s.geoCache[ip] = info
+	if geoInfoUseful(info) {
+		s.geoCache[ip] = info
+		delete(s.geoRetryAfter, ip)
+	} else {
+		s.geoRetryAfter[ip] = time.Now().Add(10 * time.Minute)
+	}
 	delete(s.geoPending, ip)
 	s.geoMu.Unlock()
 	return info
@@ -465,6 +473,10 @@ func (s *Server) ensureGeoForIPs(ips []string) {
 			s.geoMu.Unlock()
 			continue
 		}
+		if retryAt := s.geoRetryAfter[ip]; time.Now().Before(retryAt) {
+			s.geoMu.Unlock()
+			continue
+		}
 		s.geoPending[ip] = true
 		s.geoMu.Unlock()
 
@@ -472,10 +484,23 @@ func (s *Server) ensureGeoForIPs(ips []string) {
 			info := s.fetchGeoInfo(target)
 			s.geoMu.Lock()
 			delete(s.geoPending, target)
-			s.geoCache[target] = info
+			if geoInfoUseful(info) {
+				s.geoCache[target] = info
+				delete(s.geoRetryAfter, target)
+			} else {
+				s.geoRetryAfter[target] = time.Now().Add(10 * time.Minute)
+			}
 			s.geoMu.Unlock()
 		}(ip)
 	}
+}
+
+func geoInfoUseful(info GeoInfo) bool {
+	return strings.TrimSpace(info.Label) != "" ||
+		strings.TrimSpace(info.CountryCode) != "" ||
+		strings.TrimSpace(info.Country) != "" ||
+		strings.TrimSpace(info.City) != "" ||
+		strings.TrimSpace(info.ISP) != ""
 }
 
 func compactGeoLabel(country, city, isp string) string {
