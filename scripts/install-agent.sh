@@ -8,6 +8,7 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/dns-latency-router-agent}"
 CONFIG_FILE="${CONFIG_FILE:-$INSTALL_DIR/agent.yaml}"
 SERVICE_NAME="${SERVICE_NAME:-dns-latency-router-agent}"
 BIN_NAME="${BIN_NAME:-dns-latency-router-agent}"
+LAUNCHD_LABEL="${LAUNCHD_LABEL:-com.dns-latency-router.agent}"
 AGENT_ID="${AGENT_ID:-}"
 AGENT_NAME="${AGENT_NAME:-}"
 PROBE_SOURCE="${PROBE_SOURCE:-}"
@@ -54,7 +55,20 @@ os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
 case "$os/$arch" in
   linux/x86_64|linux/amd64)
-    asset="dns-latency-router-agent-linux-amd64"
+    platform="linux-amd64"
+    asset="dns-latency-router-agent-$platform"
+    ;;
+  linux/aarch64|linux/arm64)
+    platform="linux-arm64"
+    asset="dns-latency-router-agent-$platform"
+    ;;
+  darwin/x86_64|darwin/amd64)
+    platform="darwin-amd64"
+    asset="dns-latency-router-agent-$platform"
+    ;;
+  darwin/arm64|darwin/aarch64)
+    platform="darwin-arm64"
+    asset="dns-latency-router-agent-$platform"
     ;;
   *)
     echo "unsupported system: $os/$arch" >&2
@@ -63,7 +77,7 @@ case "$os/$arch" in
 esac
 
 GITHUB_DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$asset"
-CONTROLLER_DOWNLOAD_URL="$CONTROLLER_URL/api/agent/download/linux-amd64"
+CONTROLLER_DOWNLOAD_URL="$CONTROLLER_URL/api/agent/download/$platform"
 
 download() {
   url="$1"
@@ -146,7 +160,8 @@ install -m 0755 "$tmp" "$INSTALL_DIR/$BIN_NAME"
 } > "$CONFIG_FILE"
 chmod 0600 "$CONFIG_FILE"
 
-cat > "/etc/systemd/system/$SERVICE_NAME.service" <<UNIT
+if [ "$os" = "linux" ]; then
+  cat > "/etc/systemd/system/$SERVICE_NAME.service" <<UNIT
 [Unit]
 Description=DNS Latency Router Agent
 After=network-online.target
@@ -163,10 +178,49 @@ RestartSec=10
 WantedBy=multi-user.target
 UNIT
 
-systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME"
-sleep 2
-systemctl --no-pager --full status "$SERVICE_NAME" || true
+  systemctl daemon-reload
+  systemctl enable --now "$SERVICE_NAME"
+  sleep 2
+  systemctl --no-pager --full status "$SERVICE_NAME" || true
+elif [ "$os" = "darwin" ]; then
+  plist="/Library/LaunchDaemons/$LAUNCHD_LABEL.plist"
+  cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$LAUNCHD_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$INSTALL_DIR/$BIN_NAME</string>
+    <string>$CONFIG_FILE</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$INSTALL_DIR</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$INSTALL_DIR/agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>$INSTALL_DIR/agent.err</string>
+</dict>
+</plist>
+PLIST
+  chown root:wheel "$plist"
+  chmod 0644 "$plist"
+  launchctl bootout system "$plist" >/dev/null 2>&1 || true
+  launchctl bootstrap system "$plist"
+  launchctl enable "system/$LAUNCHD_LABEL"
+  launchctl kickstart -k "system/$LAUNCHD_LABEL"
+  sleep 2
+  launchctl print "system/$LAUNCHD_LABEL" || true
+else
+  echo "service installation is not implemented for $os" >&2
+  exit 1
+fi
 
 echo
 echo "Installed DNS Latency Router agent:"

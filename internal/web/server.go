@@ -201,6 +201,7 @@ func (s *Server) Start() {
 	mux.HandleFunc("/api/agent/reports", s.handleAPIAgentReports)
 	mux.HandleFunc("/api/agent/install-command", s.handleAPIAgentInstallCommand)
 	mux.HandleFunc("/api/agent/install.sh", s.handleAPIAgentInstallScript)
+	mux.HandleFunc("/api/agent/download/", s.handleAPIAgentDownload)
 	mux.HandleFunc("/api/agent/download/linux-amd64", s.handleAPIAgentDownload)
 	mux.HandleFunc("/api/check", s.handleCheck)
 	mux.HandleFunc("/api/events", s.handleSSE)
@@ -722,9 +723,13 @@ func (s *Server) handleAPIAgentDownload(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	path, ok := findAgentBinary()
+	platform := strings.TrimPrefix(r.URL.Path, "/api/agent/download/")
+	if platform == "" || platform == r.URL.Path {
+		platform = "linux-amd64"
+	}
+	path, ok := findAgentBinary(platform)
 	if !ok {
-		http.Error(w, "agent binary not found on controller; place dns-latency-router-agent-linux-amd64 next to controller binary", http.StatusNotFound)
+		http.Error(w, "agent binary not found on controller; place dns-latency-router-agent-"+platform+" next to controller binary", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Disposition", `attachment; filename="dns-latency-router-agent"`)
@@ -756,11 +761,16 @@ func agentControllerURL(cfg *config.Config, r *http.Request) string {
 	return publicBaseURL(r)
 }
 
-func findAgentBinary() (string, bool) {
+func findAgentBinary(platform string) (string, bool) {
+	platform = strings.TrimSpace(platform)
 	names := []string{
-		"dns-latency-router-agent-linux-amd64",
-		"dns-latency-router-agent",
-		"dns-latency-router-agent.exe",
+		"dns-latency-router-agent-" + platform,
+	}
+	if platform == "linux-amd64" {
+		names = append(names,
+			"dns-latency-router-agent",
+			"dns-latency-router-agent.exe",
+		)
 	}
 	dirs := []string{}
 	if exe, err := os.Executable(); err == nil {

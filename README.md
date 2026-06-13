@@ -158,7 +158,7 @@ dns_servers:
 
 主控里的 `agents` 是预期在线的 Agent 清单。Web 仪表盘会显示本地主控节点以及这些 Agent 的在线、过期、离线状态；没有写进清单但实际发来上报的临时 Agent 也会显示出来。后台管理里的 `Agent 探针` 页可以维护通信 Token、离线判定 TTL，以及联通/电信/移动子机清单。`agent.report_ttl_seconds` 控制远端 Agent 多久没上报后从在线变为过期。
 
-也可以像 Nezha 探针一样使用一键安装：在后台 `Agent 探针` 页先保存通信 Token 和主控地址，然后复制页面里的安装命令到电信/移动机器上用 root 执行。安装命令会从 GitHub 拉取 `scripts/install-agent.sh`，脚本默认从主控地址下载 `dns-latency-router-agent`，失败时再兜底 GitHub Release，随后写入 `agent.yaml`、创建 systemd 服务并自动连接主控；首次上报后会自动出现在主控列表里，再在后台修改地区/探测源和运营商即可。跨网络部署时建议把主控地址填成 ZeroTier / 内网地址。
+也可以像 Nezha 探针一样使用一键安装：在后台 `Agent 探针` 页先保存通信 Token 和主控地址，然后复制页面里的安装命令到电信/移动机器上用 root 执行。安装命令会从 GitHub 拉取 `scripts/install-agent.sh`，脚本默认从主控地址下载 `dns-latency-router-agent`，失败时再兜底 GitHub Release，随后写入 `agent.yaml`、创建系统服务并自动连接主控；Linux 使用 systemd，macOS 使用 launchd。首次上报后会自动出现在主控列表里，再在后台修改地区/探测源和运营商即可。跨网络部署时建议把主控地址填成 ZeroTier / 内网地址。
 
 默认不是“最低 Ping 获胜”，而是综合以下指标：
 
@@ -542,12 +542,16 @@ pm2 delete dns-latency-router
 
 ### Release 构建产物
 
-正式 Release 通常提供四个 amd64 产物：
+正式 Release 通常提供这些产物：
 
 - `dns-latency-router-windows-amd64.exe`
 - `dns-latency-router-linux-amd64`
+- `dns-latency-router-linux-arm64`
 - `dns-latency-router-agent-windows-amd64.exe`
 - `dns-latency-router-agent-linux-amd64`
+- `dns-latency-router-agent-linux-arm64`
+- `dns-latency-router-agent-darwin-amd64`
+- `dns-latency-router-agent-darwin-arm64`
 
 主控二进制包含嵌入式 Web 仪表盘和本地 SVG 国旗资源；Agent 二进制不包含 Web UI，只负责探测和上报。
 
