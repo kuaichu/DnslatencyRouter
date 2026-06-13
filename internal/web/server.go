@@ -125,6 +125,8 @@ type Server struct {
 	triggerCh             chan<- struct{} // signal main loop to run a check immediately
 	logBuf                []LogEntry
 	logBufMu              sync.Mutex
+	store                 *runtimeStore
+	dbPath                string
 	logsPath              string
 	historyPath           string
 	samplesPath           string
@@ -190,9 +192,15 @@ func New(port int, cfgPath string, triggerCh chan<- struct{}, onConfig func(targ
 		geoClient:            &http.Client{Timeout: 4 * time.Second},
 	}
 	stateDir := filepath.Join(filepath.Dir(cfgPath), "data")
+	s.dbPath = filepath.Join(stateDir, "runtime.db")
 	s.logsPath = filepath.Join(stateDir, "runtime-logs.jsonl")
 	s.historyPath = filepath.Join(stateDir, "runtime-history.json")
 	s.samplesPath = filepath.Join(stateDir, "runtime-samples.json")
+	if store, err := openRuntimeStore(s.dbPath); err == nil {
+		s.store = store
+	} else {
+		log.Printf("[store] sqlite unavailable, falling back to legacy JSON runtime files: %v", err)
+	}
 	s.loadPersistedData()
 	s.ensureGeoForSamples()
 	s.status.Store(&Status{CheckIntervalSec: 300})
@@ -244,6 +252,9 @@ func (s *Server) WaitReady() {
 func (s *Server) Stop() {
 	if s.httpServer != nil {
 		s.httpServer.Close()
+	}
+	if s.store != nil {
+		s.store.close()
 	}
 }
 
@@ -404,6 +415,11 @@ func (s *Server) UpdateResolvedIPsForProfile(profileID string, ips []string) {
 		s.activeIPs = merged
 	}
 	s.activeIPsMu.Unlock()
+	if s.store != nil {
+		if err := s.store.replaceActiveIPs(profileID, next); err != nil {
+			log.Printf("[store] persist active IPs failed: %v", err)
+		}
+	}
 }
 
 func (s *Server) candidateIPsForProfile(profileID string) []string {
@@ -498,6 +514,23 @@ func (s *Server) controllerCandidateIPsForProfile(cfg *config.Config, profile co
 		go s.refreshControllerCandidateIPs(profile.ID, key, append([]string(nil), targets...), append([]string(nil), servers...))
 	}
 	s.controllerCandidateMu.Unlock()
+	if s.store != nil {
+		entry, ok, err := s.store.loadControllerCandidate(key)
+		if err != nil {
+			log.Printf("[store] load controller candidates failed: %v", err)
+		}
+		if ok {
+			s.controllerCandidateMu.Lock()
+			s.controllerCandidates[key] = entry
+			s.controllerCandidateMu.Unlock()
+			if len(stale) == 0 {
+				stale = append([]string(nil), entry.IPs...)
+			}
+			if now.Before(entry.ExpiresAt) {
+				return append([]string(nil), entry.IPs...)
+			}
+		}
+	}
 	return stale
 }
 
@@ -525,8 +558,14 @@ func (s *Server) refreshControllerCandidateIPs(profileID, key string, targets, s
 		IPs:       append([]string(nil), resolved...),
 		ExpiresAt: time.Now().Add(ttl),
 	}
+	entry := s.controllerCandidates[key]
 	delete(s.controllerRefreshes, key)
 	s.controllerCandidateMu.Unlock()
+	if s.store != nil {
+		if err := s.store.upsertControllerCandidates(profileID, key, entry); err != nil {
+			log.Printf("[store] persist controller candidates failed: %v", err)
+		}
+	}
 }
 
 func profileTargetDomains(profile config.AirportProfile) []string {
@@ -1259,6 +1298,11 @@ func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
 	s.agentReportsMu.Lock()
 	s.agentReports[report.AgentID] = report
 	s.agentReportsMu.Unlock()
+	if s.store != nil {
+		if err := s.store.upsertAgentReport(report); err != nil {
+			log.Printf("[store] persist agent report failed: %v", err)
+		}
+	}
 
 	for _, profile := range report.Profiles {
 		if len(profile.ResolvedIPs) > 0 {
@@ -1318,16 +1362,33 @@ func agentSamplesFromReport(report agent.Report) []IPSample {
 }
 
 func (s *Server) AgentReports(ttl time.Duration) []agent.Report {
-	if ttl <= 0 {
+	filterTTL := ttl
+	if filterTTL == 0 {
 		ttl = 15 * time.Minute
+		filterTTL = ttl
 	}
-	cutoff := time.Now().Add(-ttl)
 	assignments := s.agentAssignments()
+	if s.store != nil {
+		reports, err := s.store.loadAgentReports(filterTTL)
+		if err != nil {
+			log.Printf("[store] load agent reports failed: %v", err)
+		} else {
+			out := make([]agent.Report, 0, len(reports))
+			for _, report := range reports {
+				out = append(out, normalizeAgentReportWithAssignments(report, assignments))
+			}
+			return out
+		}
+	}
+	var cutoff time.Time
+	if filterTTL > 0 {
+		cutoff = time.Now().Add(-filterTTL)
+	}
 	s.agentReportsMu.RLock()
 	defer s.agentReportsMu.RUnlock()
 	reports := make([]agent.Report, 0, len(s.agentReports))
 	for _, report := range s.agentReports {
-		if !report.FinishedAt.IsZero() && report.FinishedAt.Before(cutoff) {
+		if !cutoff.IsZero() && !report.FinishedAt.IsZero() && report.FinishedAt.Before(cutoff) {
 			continue
 		}
 		reports = append(reports, normalizeAgentReportWithAssignments(report, assignments))
@@ -1371,9 +1432,7 @@ func (s *Server) AgentStatuses(ttl time.Duration) []AgentStatus {
 			Status:       "offline",
 		}
 	}
-	s.agentReportsMu.RLock()
-	defer s.agentReportsMu.RUnlock()
-	for _, report := range s.agentReports {
+	for _, report := range s.AgentReports(-1) {
 		id := strings.TrimSpace(report.AgentID)
 		if id == "" {
 			continue

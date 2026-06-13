@@ -84,9 +84,41 @@ func (s *Server) loadPersistedData() {
 	s.logBuf = s.loadLogs()
 	s.history = s.loadHistory()
 	s.samples = s.loadSamples()
+	s.loadAgentReports()
+	s.loadActiveIPs()
+	s.loadControllerCandidates()
+	if s.store != nil {
+		if err := s.store.prune(); err != nil {
+			log.Printf("[store] prune failed: %v", err)
+		}
+	}
 }
 
 func (s *Server) loadLogs() []LogEntry {
+	if s.store != nil {
+		logs, err := s.store.loadLogs(maxLogEntries)
+		if err != nil {
+			log.Printf("[store] load logs failed: %v", err)
+		}
+		if len(logs) == 0 {
+			logs = readJSONLines[LogEntry](s.logsPath)
+			if len(logs) == 0 {
+				logs = s.importPM2Logs()
+			}
+			logs = pruneLogEntries(logs)
+			if len(logs) > 0 {
+				if err := s.store.replaceLogs(logs); err != nil {
+					log.Printf("[store] import logs failed: %v", err)
+				}
+			}
+		} else {
+			logs = pruneLogEntries(logs)
+			if err := s.store.replaceLogs(logs); err != nil {
+				log.Printf("[store] prune logs failed: %v", err)
+			}
+		}
+		return logs
+	}
 	logs := readJSONLines[LogEntry](s.logsPath)
 	if len(logs) == 0 {
 		logs = s.importPM2Logs()
@@ -99,6 +131,27 @@ func (s *Server) loadLogs() []LogEntry {
 }
 
 func (s *Server) loadHistory() []CheckRecord {
+	if s.store != nil {
+		hist, err := s.store.loadHistory(maxHistoryItems)
+		if err != nil {
+			log.Printf("[store] load history failed: %v", err)
+		}
+		if len(hist) == 0 {
+			hist = readJSONArray[CheckRecord](s.historyPath)
+			hist = pruneHistory(hist)
+			if len(hist) > 0 {
+				if err := s.store.replaceHistory(hist); err != nil {
+					log.Printf("[store] import history failed: %v", err)
+				}
+			}
+		} else {
+			hist = pruneHistory(hist)
+			if err := s.store.replaceHistory(hist); err != nil {
+				log.Printf("[store] prune history failed: %v", err)
+			}
+		}
+		return hist
+	}
 	hist := readJSONArray[CheckRecord](s.historyPath)
 	hist = pruneHistory(hist)
 	if len(hist) > 0 {
@@ -108,12 +161,87 @@ func (s *Server) loadHistory() []CheckRecord {
 }
 
 func (s *Server) loadSamples() []IPSample {
+	if s.store != nil {
+		samples, err := s.store.loadSamples(maxSampleItems)
+		if err != nil {
+			log.Printf("[store] load samples failed: %v", err)
+		}
+		if len(samples) == 0 {
+			samples = readJSONArray[IPSample](s.samplesPath)
+			samples = pruneSamples(samples)
+			if len(samples) > 0 {
+				if err := s.store.replaceSamples(samples); err != nil {
+					log.Printf("[store] import samples failed: %v", err)
+				}
+			}
+		} else {
+			samples = pruneSamples(samples)
+			if err := s.store.replaceSamples(samples); err != nil {
+				log.Printf("[store] prune samples failed: %v", err)
+			}
+		}
+		return samples
+	}
 	samples := readJSONArray[IPSample](s.samplesPath)
 	samples = pruneSamples(samples)
 	if len(samples) > 0 {
 		_ = writeJSONArray(s.samplesPath, samples)
 	}
 	return samples
+}
+
+func (s *Server) loadAgentReports() {
+	if s.store == nil {
+		return
+	}
+	reports, err := s.store.loadAgentReports(0)
+	if err != nil {
+		log.Printf("[store] load agent reports failed: %v", err)
+		return
+	}
+	s.agentReportsMu.Lock()
+	for _, report := range reports {
+		if report.AgentID == "" {
+			continue
+		}
+		s.agentReports[report.AgentID] = report
+	}
+	s.agentReportsMu.Unlock()
+}
+
+func (s *Server) loadActiveIPs() {
+	if s.store == nil {
+		return
+	}
+	active, byProfile, err := s.store.loadActiveIPs()
+	if err != nil {
+		log.Printf("[store] load active IPs failed: %v", err)
+		return
+	}
+	if len(active) == 0 && len(byProfile) == 0 {
+		return
+	}
+	s.activeIPsMu.Lock()
+	s.activeIPs = active
+	s.activeIPsByProfile = byProfile
+	s.activeIPsMu.Unlock()
+}
+
+func (s *Server) loadControllerCandidates() {
+	if s.store == nil {
+		return
+	}
+	candidates, err := s.store.loadControllerCandidates()
+	if err != nil {
+		log.Printf("[store] load controller candidates failed: %v", err)
+		return
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	s.controllerCandidateMu.Lock()
+	s.controllerCandidates = candidates
+	s.controllerCandidateMu.Unlock()
 }
 
 func (s *Server) importPM2Logs() []LogEntry {
@@ -209,6 +337,12 @@ func (s *Server) persistLogs() {
 	logs := make([]LogEntry, len(s.logBuf))
 	copy(logs, s.logBuf)
 	s.logBufMu.Unlock()
+	if s.store != nil {
+		if err := s.store.replaceLogs(logs); err != nil {
+			log.Printf("[store] persist logs failed: %v", err)
+		}
+		return
+	}
 	_ = rewriteJSONLines(s.logsPath, logs)
 }
 
@@ -217,6 +351,12 @@ func (s *Server) persistHistory() {
 	hist := make([]CheckRecord, len(s.history))
 	copy(hist, s.history)
 	s.historyMu.Unlock()
+	if s.store != nil {
+		if err := s.store.replaceHistory(hist); err != nil {
+			log.Printf("[store] persist history failed: %v", err)
+		}
+		return
+	}
 	_ = writeJSONArray(s.historyPath, hist)
 }
 
@@ -225,6 +365,12 @@ func (s *Server) persistSamples() {
 	samples := make([]IPSample, len(s.samples))
 	copy(samples, s.samples)
 	s.samplesMu.Unlock()
+	if s.store != nil {
+		if err := s.store.replaceSamples(samples); err != nil {
+			log.Printf("[store] persist samples failed: %v", err)
+		}
+		return
+	}
 	_ = writeJSONArray(s.samplesPath, samples)
 }
 
