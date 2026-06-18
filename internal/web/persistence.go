@@ -76,6 +76,16 @@ type IPStat struct {
 	LastError    string    `json:"lastError,omitempty"`
 }
 
+type IPLifecycle struct {
+	AgentID      string
+	ProfileID    string
+	Region       string
+	IP           string
+	FirstSeen    time.Time
+	LastSeen     time.Time
+	LastActiveAt time.Time
+}
+
 func sampleKey(agentID, profileID, region, ip string) string {
 	return agentID + "|" + profileID + "|" + region + "|" + ip
 }
@@ -87,6 +97,7 @@ func (s *Server) loadPersistedData() {
 	s.loadAgentReports()
 	s.loadActiveIPs()
 	s.loadControllerCandidates()
+	s.loadIPLifecycles()
 	if s.store != nil {
 		if err := s.store.prune(); err != nil {
 			log.Printf("[store] prune failed: %v", err)
@@ -244,6 +255,32 @@ func (s *Server) loadControllerCandidates() {
 	s.controllerCandidateMu.Unlock()
 }
 
+func (s *Server) loadIPLifecycles() {
+	records := make(map[string]IPLifecycle)
+	if s.store != nil {
+		loaded, err := s.store.loadIPLifecycles()
+		if err != nil {
+			log.Printf("[store] load IP lifecycles failed: %v", err)
+		} else {
+			records = loaded
+		}
+	}
+	for _, sample := range pruneSamples(readJSONArray[IPSample](s.samplesPath)) {
+		mergeIPLifecycle(records, sample)
+	}
+	for _, sample := range s.samples {
+		mergeIPLifecycle(records, sample)
+	}
+	if s.store != nil && len(records) > 0 {
+		if err := s.store.replaceIPLifecycles(records); err != nil {
+			log.Printf("[store] seed IP lifecycles failed: %v", err)
+		}
+	}
+	s.ipLifecyclesMu.Lock()
+	s.ipLifecycles = records
+	s.ipLifecyclesMu.Unlock()
+}
+
 func (s *Server) importPM2Logs() []LogEntry {
 	baseDir := filepath.Dir(s.cfgPath)
 	candidates := []string{
@@ -374,6 +411,80 @@ func (s *Server) persistSamples() {
 	_ = writeJSONArray(s.samplesPath, samples)
 }
 
+func buildIPLifecycles(samples []IPSample) map[string]IPLifecycle {
+	records := make(map[string]IPLifecycle)
+	for _, sample := range samples {
+		mergeIPLifecycle(records, sample)
+	}
+	return records
+}
+
+func mergeIPLifecycle(records map[string]IPLifecycle, sample IPSample) {
+	if sample.IP == "" || sample.Time.IsZero() {
+		return
+	}
+	key := sampleKey(sample.AgentID, sample.ProfileID, sample.Region, sample.IP)
+	rec, ok := records[key]
+	if !ok {
+		records[key] = IPLifecycle{
+			AgentID:      sample.AgentID,
+			ProfileID:    sample.ProfileID,
+			Region:       sample.Region,
+			IP:           sample.IP,
+			FirstSeen:    sample.Time,
+			LastSeen:     sample.Time,
+			LastActiveAt: sample.Time,
+		}
+		return
+	}
+	if sample.Time.Before(rec.FirstSeen) || rec.FirstSeen.IsZero() {
+		rec.FirstSeen = sample.Time
+	}
+	if sample.Time.After(rec.LastSeen) {
+		rec.LastSeen = sample.Time
+	}
+	if sample.Time.After(rec.LastActiveAt) {
+		rec.LastActiveAt = sample.Time
+	}
+	records[key] = rec
+}
+
+func (s *Server) updateIPLifecycles(samples []IPSample) {
+	if len(samples) == 0 {
+		return
+	}
+	s.ipLifecyclesMu.Lock()
+	if s.ipLifecycles == nil {
+		s.ipLifecycles = make(map[string]IPLifecycle)
+	}
+	for _, sample := range samples {
+		mergeIPLifecycle(s.ipLifecycles, sample)
+	}
+	snapshot := make(map[string]IPLifecycle, len(s.ipLifecycles))
+	for key, rec := range s.ipLifecycles {
+		snapshot[key] = rec
+	}
+	s.ipLifecyclesMu.Unlock()
+	if s.store != nil {
+		if err := s.store.replaceIPLifecycles(snapshot); err != nil {
+			log.Printf("[store] persist IP lifecycles failed: %v", err)
+		}
+	}
+}
+
+func (s *Server) ipLifecycleSnapshot() map[string]IPLifecycle {
+	s.ipLifecyclesMu.RLock()
+	defer s.ipLifecyclesMu.RUnlock()
+	if len(s.ipLifecycles) == 0 {
+		return nil
+	}
+	out := make(map[string]IPLifecycle, len(s.ipLifecycles))
+	for key, rec := range s.ipLifecycles {
+		out[key] = rec
+	}
+	return out
+}
+
 func (s *Server) pruneInactiveOrphanSamplesLocked() bool {
 	ttlHours, _, _ := s.safeguards()
 	if ttlHours <= 0 || len(s.samples) == 0 {
@@ -429,6 +540,7 @@ func (s *Server) pruneInactiveOrphanSamplesLocked() bool {
 
 func (s *Server) computeIPStats() []IPStat {
 	assignments := s.agentAssignments()
+	lifecycles := s.ipLifecycleSnapshot()
 	s.samplesMu.Lock()
 	defer s.samplesMu.Unlock()
 
@@ -443,6 +555,11 @@ func (s *Server) computeIPStats() []IPStat {
 		}
 		sample := normalizeIPSampleWithAssignments(rawSample, assignments)
 		key := sampleKey(sample.AgentID, sample.ProfileID, sample.Region, sample.IP)
+		lifecycle := lifecycles[key]
+		firstSeen := sample.Time
+		if !lifecycle.FirstSeen.IsZero() && lifecycle.FirstSeen.Before(firstSeen) {
+			firstSeen = lifecycle.FirstSeen
+		}
 		stat := statsMap[key]
 		if stat == nil {
 			stat = &IPStat{
@@ -457,12 +574,15 @@ func (s *Server) computeIPStats() []IPStat {
 				Region:       sample.Region,
 				RegionLabel:  sample.RegionLabel,
 				BestLatency:  0,
-				FirstSeen:    sample.Time,
+				FirstSeen:    firstSeen,
 			}
 			statsMap[key] = stat
 		}
 
 		stat.SeenCount++
+		if firstSeen.Before(stat.FirstSeen) {
+			stat.FirstSeen = firstSeen
+		}
 		if sample.Time.Before(stat.FirstSeen) {
 			stat.FirstSeen = sample.Time
 		}

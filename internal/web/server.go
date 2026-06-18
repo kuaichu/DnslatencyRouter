@@ -113,6 +113,8 @@ type Server struct {
 	historyMu             sync.Mutex
 	samples               []IPSample
 	samplesMu             sync.Mutex
+	ipLifecycles          map[string]IPLifecycle
+	ipLifecyclesMu        sync.RWMutex
 	sseClients            map[string]chan sseEvent
 	sseMu                 sync.Mutex
 	sseNextID             int64
@@ -182,6 +184,7 @@ func New(port int, cfgPath string, triggerCh chan<- struct{}, onConfig func(targ
 		cfgPath:              cfgPath,
 		onConfig:             onConfig,
 		triggerCh:            triggerCh,
+		ipLifecycles:         make(map[string]IPLifecycle),
 		activeIPs:            make(map[string]bool),
 		activeIPsByProfile:   make(map[string]map[string]bool),
 		controllerCandidates: make(map[string]controllerCandidateCacheEntry),
@@ -357,6 +360,7 @@ func (s *Server) AddSamples(samples []IPSample) {
 	if len(samples) == 0 {
 		return
 	}
+	s.updateIPLifecycles(samples)
 	s.samplesMu.Lock()
 	s.samples = append(s.samples, samples...)
 	s.samples = pruneSamples(s.samples)
@@ -1336,8 +1340,15 @@ func agentSamplesFromReport(report agent.Report) []IPSample {
 			if !checker.IsUsableCandidateIP(result.IP) {
 				continue
 			}
+			sampleTime := result.ObservedAt
+			if sampleTime.IsZero() {
+				sampleTime = profile.FinishedAt
+			}
+			if sampleTime.IsZero() {
+				sampleTime = report.FinishedAt
+			}
 			sample := IPSample{
-				Time:         report.FinishedAt,
+				Time:         sampleTime,
 				AgentID:      report.AgentID,
 				AgentName:    report.AgentName,
 				Carrier:      carrier,

@@ -30,14 +30,15 @@ type JobResponse struct {
 }
 
 type Result struct {
-	IP        string  `json:"ip"`
-	Latency   float64 `json:"latency"`
-	Jitter    float64 `json:"jitter"`
-	LossRate  float64 `json:"lossRate"`
-	Attempts  int     `json:"attempts"`
-	Successes int     `json:"successes"`
-	Score     float64 `json:"score"`
-	Error     string  `json:"error,omitempty"`
+	IP         string    `json:"ip"`
+	Latency    float64   `json:"latency"`
+	Jitter     float64   `json:"jitter"`
+	LossRate   float64   `json:"lossRate"`
+	Attempts   int       `json:"attempts"`
+	Successes  int       `json:"successes"`
+	Score      float64   `json:"score"`
+	ObservedAt time.Time `json:"observedAt,omitempty"`
+	Error      string    `json:"error,omitempty"`
 }
 
 type ProfileReport struct {

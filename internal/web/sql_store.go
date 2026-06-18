@@ -92,11 +92,22 @@ func (s *runtimeStore) migrate() error {
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY (profile_id, ip)
 		)`,
+		`CREATE TABLE IF NOT EXISTS ip_lifecycles (
+			agent_id TEXT NOT NULL DEFAULT '',
+			profile_id TEXT NOT NULL DEFAULT '',
+			region TEXT NOT NULL DEFAULT '',
+			ip TEXT NOT NULL,
+			first_seen TEXT NOT NULL,
+			last_seen TEXT NOT NULL,
+			last_active_at TEXT NOT NULL,
+			PRIMARY KEY (agent_id, profile_id, region, ip)
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_runtime_logs_time ON runtime_logs(time)`,
 		`CREATE INDEX IF NOT EXISTS idx_check_history_time ON check_history(time)`,
 		`CREATE INDEX IF NOT EXISTS idx_ip_samples_time ON ip_samples(time)`,
 		`CREATE INDEX IF NOT EXISTS idx_ip_samples_profile_time ON ip_samples(profile_id, time)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_reports_finished ON agent_reports(finished_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_ip_lifecycles_first_seen ON ip_lifecycles(first_seen)`,
 	}
 	for _, stmt := range statements {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -407,6 +418,58 @@ func (s *runtimeStore) loadActiveIPs() (map[string]bool, map[string]map[string]b
 		}
 	}
 	return active, byProfile, rows.Err()
+}
+
+func (s *runtimeStore) replaceIPLifecycles(records map[string]IPLifecycle) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM ip_lifecycles`); err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO ip_lifecycles(agent_id, profile_id, region, ip, first_seen, last_seen, last_active_at) VALUES(?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, rec := range records {
+		if rec.IP == "" || rec.FirstSeen.IsZero() {
+			continue
+		}
+		if rec.LastSeen.IsZero() {
+			rec.LastSeen = rec.FirstSeen
+		}
+		if rec.LastActiveAt.IsZero() {
+			rec.LastActiveAt = rec.LastSeen
+		}
+		if _, err := stmt.Exec(rec.AgentID, rec.ProfileID, rec.Region, rec.IP, timeText(rec.FirstSeen), timeText(rec.LastSeen), timeText(rec.LastActiveAt)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *runtimeStore) loadIPLifecycles() (map[string]IPLifecycle, error) {
+	rows, err := s.db.Query(`SELECT agent_id, profile_id, region, ip, first_seen, last_seen, last_active_at FROM ip_lifecycles`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := make(map[string]IPLifecycle)
+	for rows.Next() {
+		var rec IPLifecycle
+		var firstSeen, lastSeen, lastActiveAt string
+		if err := rows.Scan(&rec.AgentID, &rec.ProfileID, &rec.Region, &rec.IP, &firstSeen, &lastSeen, &lastActiveAt); err != nil {
+			return nil, err
+		}
+		rec.FirstSeen = parseTimeText(firstSeen)
+		rec.LastSeen = parseTimeText(lastSeen)
+		rec.LastActiveAt = parseTimeText(lastActiveAt)
+		records[sampleKey(rec.AgentID, rec.ProfileID, rec.Region, rec.IP)] = rec
+	}
+	return records, rows.Err()
 }
 
 func (s *runtimeStore) prune() error {

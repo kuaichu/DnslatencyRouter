@@ -255,13 +255,14 @@ func resolveProfileIPs(profile config.AirportProfile, dnsServers []string) ([]st
 
 func resultFromChecker(result checker.Result) Result {
 	out := Result{
-		IP:        result.IP,
-		Latency:   float64(result.Latency.Microseconds()) / 1000.0,
-		Jitter:    float64(result.Jitter.Microseconds()) / 1000.0,
-		LossRate:  result.LossRate,
-		Attempts:  result.Attempts,
-		Successes: result.Successes,
-		Score:     result.Score,
+		IP:         result.IP,
+		Latency:    float64(result.Latency.Microseconds()) / 1000.0,
+		Jitter:     float64(result.Jitter.Microseconds()) / 1000.0,
+		LossRate:   result.LossRate,
+		Attempts:   result.Attempts,
+		Successes:  result.Successes,
+		Score:      result.Score,
+		ObservedAt: result.FinishedAt,
 	}
 	if result.Err != nil {
 		out.Error = result.Err.Error()

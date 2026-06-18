@@ -23,15 +23,17 @@ var icmpSeq atomic.Uint32
 
 // Result holds the ping result for a single IP.
 type Result struct {
-	IP        string
-	Latency   time.Duration
-	Jitter    time.Duration
-	LossRate  float64
-	Attempts  int
-	Successes int
-	Score     float64
-	LastErr   error
-	Err       error
+	IP         string
+	Latency    time.Duration
+	Jitter     time.Duration
+	LossRate   float64
+	Attempts   int
+	Successes  int
+	Score      float64
+	StartedAt  time.Time
+	FinishedAt time.Time
+	LastErr    error
+	Err        error
 }
 
 // ResolveFromAllDNS resolves a domain from multiple DNS servers and returns unique IPs.
@@ -344,6 +346,7 @@ func PingAll(ips []string, mode string, port int, timeout time.Duration, attempt
 	for i, ip := range ips {
 		go func(idx int, addr string) {
 			defer wg.Done()
+			started := time.Now()
 			probes := make([]Result, 0, attempts)
 			for attempt := 0; attempt < attempts; attempt++ {
 				switch mode {
@@ -353,7 +356,10 @@ func PingAll(ips []string, mode string, port int, timeout time.Duration, attempt
 					probes = append(probes, PingTCP(addr, port, timeout))
 				}
 			}
-			results[idx] = aggregateResults(addr, probes, latencyWeight, jitterWeight, lossWeight)
+			result := aggregateResults(addr, probes, latencyWeight, jitterWeight, lossWeight)
+			result.StartedAt = started
+			result.FinishedAt = time.Now()
+			results[idx] = result
 		}(i, ip)
 	}
 

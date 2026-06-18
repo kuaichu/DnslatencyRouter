@@ -622,6 +622,10 @@ func runAirportProfileOnce(cfg *config.Config, profile config.AirportProfile, ws
 	now := time.Now()
 	samples := make([]web.IPSample, 0, len(results))
 	for _, r := range results {
+		sampleTime := r.FinishedAt
+		if sampleTime.IsZero() {
+			sampleTime = now
+		}
 		geo := sc.geoForIP(ws, r.IP)
 		region := classifyResultRegion(profile, profile.RegionRecords, geo)
 		regionLabel := config.RegionLabel(region)
@@ -631,7 +635,7 @@ func runAirportProfileOnce(cfg *config.Config, profile config.AirportProfile, ws
 		resultsByRegion[region] = append(resultsByRegion[region], r)
 
 		sample := web.IPSample{
-			Time: now, ProfileID: profile.ID, ProfileName: profile.Name,
+			Time: sampleTime, ProfileID: profile.ID, ProfileName: profile.Name,
 			Region: region, RegionLabel: regionLabel, IP: r.IP,
 		}
 		if r.Err != nil {
@@ -1217,8 +1221,12 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 		now := time.Now()
 		samples := make([]web.IPSample, 0, len(results))
 		for _, r := range results {
+			sampleTime := r.FinishedAt
+			if sampleTime.IsZero() {
+				sampleTime = now
+			}
 			sample := web.IPSample{
-				Time: now,
+				Time: sampleTime,
 				IP:   r.IP,
 			}
 			if r.Err != nil {
