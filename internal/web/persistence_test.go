@@ -33,3 +33,21 @@ func TestUpdateIPLifecyclesKeepsOriginalFirstSeen(t *testing.T) {
 		t.Fatalf("last seen not updated: got %s, want %s", rec.LastSeen, later)
 	}
 }
+
+func TestPruneSamplesKeepsSevenDayWindowWithoutCountCap(t *testing.T) {
+	now := time.Now()
+	samples := make([]IPSample, 2500)
+	for i := range samples {
+		samples[i] = IPSample{
+			Time:    now.Add(-time.Duration(i) * time.Second),
+			IP:      "34.96.159.37",
+			Latency: 30,
+			Success: true,
+		}
+	}
+
+	pruned := pruneSamples(samples)
+	if len(pruned) != len(samples) {
+		t.Fatalf("samples were capped by count: got %d, want %d", len(pruned), len(samples))
+	}
+}

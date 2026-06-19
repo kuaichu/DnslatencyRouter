@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -336,10 +337,9 @@ func (s *Server) AddHistory(rec CheckRecord) {
 	s.historyMu.Lock()
 	s.history = append(s.history, rec)
 	s.history = pruneHistory(s.history)
-	hist := make([]CheckRecord, len(s.history))
-	copy(hist, s.history)
+	hist := recentHistory(s.history, maxHistoryAPIItems)
 	s.historyMu.Unlock()
-	s.persistHistory()
+	s.persistHistoryRecord(rec)
 	s.broadcast("history", mustJSON(hist))
 }
 
@@ -366,7 +366,7 @@ func (s *Server) AddSamples(samples []IPSample) {
 	s.samples = pruneSamples(s.samples)
 	pruned := s.pruneInactiveOrphanSamplesLocked()
 	s.samplesMu.Unlock()
-	s.persistSamples()
+	s.persistSampleBatch(samples, pruned)
 	s.ensureGeoForIPs(sampleIPs(samples))
 	if pruned {
 		log.Printf("[gc] runtime sample store compacted after orphan inactivity pruning")
@@ -881,8 +881,7 @@ func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAPIHistory(w http.ResponseWriter, r *http.Request) {
 	s.historyMu.Lock()
-	hist := make([]CheckRecord, len(s.history))
-	copy(hist, s.history)
+	hist := recentHistory(s.history, maxHistoryAPIItems)
 	s.historyMu.Unlock()
 	writeJSON(w, hist)
 }
@@ -893,14 +892,43 @@ func (s *Server) handleAPIIPStats(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAPIIPSamples(w http.ResponseWriter, r *http.Request) {
 	assignments := s.agentAssignments()
+	q := r.URL.Query()
+	wantAgent := strings.TrimSpace(q.Get("agent_id"))
+	wantProfile := strings.TrimSpace(q.Get("profile_id"))
+	wantIP := strings.TrimSpace(q.Get("ip"))
+	if normalized, ok := checker.NormalizeCandidateIP(wantIP); ok {
+		wantIP = normalized
+	}
+	limit := maxSampleAPIItems
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			if n <= 0 {
+				limit = 0
+			} else if n < limit {
+				limit = n
+			}
+		}
+	}
 	s.samplesMu.Lock()
-	samples := make([]IPSample, len(s.samples))
-	copy(samples, s.samples)
+	samples := make([]IPSample, 0, len(s.samples))
+	for _, sample := range s.samples {
+		if wantAgent != "" && sample.AgentID != wantAgent {
+			continue
+		}
+		if wantProfile != "" && sample.ProfileID != wantProfile {
+			continue
+		}
+		if wantIP != "" && sample.IP != wantIP {
+			continue
+		}
+		samples = append(samples, sample)
+	}
 	s.samplesMu.Unlock()
 	for i := range samples {
 		samples[i] = normalizeIPSampleWithAssignments(samples[i], assignments)
 	}
 	samples = filterUsableSamples(samples)
+	samples = recentSamples(samples, limit)
 	writeJSON(w, samples)
 }
 
@@ -2425,8 +2453,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial history
 	s.historyMu.Lock()
-	hist := make([]CheckRecord, len(s.history))
-	copy(hist, s.history)
+	hist := recentHistory(s.history, maxHistoryAPIItems)
 	s.historyMu.Unlock()
 	if len(hist) > 0 {
 		fmt.Fprintf(w, "event: history\ndata: %s\n\n", mustJSON(hist))

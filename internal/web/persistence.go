@@ -15,10 +15,10 @@ import (
 )
 
 const (
-	retentionWindow = 7 * 24 * time.Hour
-	maxLogEntries   = 2000
-	maxHistoryItems = 2000
-	maxSampleItems  = 2000
+	retentionWindow    = 7 * 24 * time.Hour
+	maxLogEntries      = 2000
+	maxHistoryAPIItems = 2000
+	maxSampleAPIItems  = 5000
 )
 
 type LogEntry struct {
@@ -143,7 +143,7 @@ func (s *Server) loadLogs() []LogEntry {
 
 func (s *Server) loadHistory() []CheckRecord {
 	if s.store != nil {
-		hist, err := s.store.loadHistory(maxHistoryItems)
+		hist, err := s.store.loadHistory(0)
 		if err != nil {
 			log.Printf("[store] load history failed: %v", err)
 		}
@@ -173,7 +173,7 @@ func (s *Server) loadHistory() []CheckRecord {
 
 func (s *Server) loadSamples() []IPSample {
 	if s.store != nil {
-		samples, err := s.store.loadSamples(maxSampleItems)
+		samples, err := s.store.loadSamples(0)
 		if err != nil {
 			log.Printf("[store] load samples failed: %v", err)
 		}
@@ -346,9 +346,6 @@ func pruneHistory(hist []CheckRecord) []CheckRecord {
 		}
 		out = append(out, rec)
 	}
-	if len(out) > maxHistoryItems {
-		out = out[len(out)-maxHistoryItems:]
-	}
 	return out
 }
 
@@ -363,9 +360,28 @@ func pruneSamples(samples []IPSample) []IPSample {
 		rec.IP = normalized
 		out = append(out, rec)
 	}
-	if len(out) > maxSampleItems {
-		out = out[len(out)-maxSampleItems:]
+	return out
+}
+
+func recentHistory(hist []CheckRecord, limit int) []CheckRecord {
+	if limit <= 0 || len(hist) <= limit {
+		out := make([]CheckRecord, len(hist))
+		copy(out, hist)
+		return out
 	}
+	out := make([]CheckRecord, limit)
+	copy(out, hist[len(hist)-limit:])
+	return out
+}
+
+func recentSamples(samples []IPSample, limit int) []IPSample {
+	if limit <= 0 || len(samples) <= limit {
+		out := make([]IPSample, len(samples))
+		copy(out, samples)
+		return out
+	}
+	out := make([]IPSample, limit)
+	copy(out, samples[len(samples)-limit:])
 	return out
 }
 
@@ -397,6 +413,19 @@ func (s *Server) persistHistory() {
 	_ = writeJSONArray(s.historyPath, hist)
 }
 
+func (s *Server) persistHistoryRecord(rec CheckRecord) {
+	if s.store != nil {
+		if err := s.store.appendHistory(rec); err != nil {
+			log.Printf("[store] append history failed: %v", err)
+		}
+		if err := s.store.prune(); err != nil {
+			log.Printf("[store] prune failed: %v", err)
+		}
+		return
+	}
+	s.persistHistory()
+}
+
 func (s *Server) persistSamples() {
 	s.samplesMu.Lock()
 	samples := make([]IPSample, len(s.samples))
@@ -409,6 +438,23 @@ func (s *Server) persistSamples() {
 		return
 	}
 	_ = writeJSONArray(s.samplesPath, samples)
+}
+
+func (s *Server) persistSampleBatch(samples []IPSample, replace bool) {
+	if s.store != nil {
+		if replace {
+			s.persistSamples()
+			return
+		}
+		if err := s.store.appendSamples(samples); err != nil {
+			log.Printf("[store] append samples failed: %v", err)
+		}
+		if err := s.store.prune(); err != nil {
+			log.Printf("[store] prune failed: %v", err)
+		}
+		return
+	}
+	s.persistSamples()
 }
 
 func buildIPLifecycles(samples []IPSample) map[string]IPLifecycle {

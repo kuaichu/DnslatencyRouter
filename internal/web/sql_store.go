@@ -215,10 +215,22 @@ func (s *runtimeStore) replaceHistory(history []CheckRecord) error {
 	return tx.Commit()
 }
 
+func (s *runtimeStore) appendHistory(rec CheckRecord) error {
+	_, err := s.db.Exec(`INSERT INTO check_history(time, profile_id, region, ip, latency, success, error) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		timeText(rec.Time), rec.ProfileID, rec.Region, rec.IP, rec.Latency, boolInt(rec.Success), rec.Error)
+	return err
+}
+
 func (s *runtimeStore) loadHistory(limit int) ([]CheckRecord, error) {
-	rows, err := s.db.Query(`SELECT time, profile_id, region, ip, latency, success, error FROM (
-		SELECT id, time, profile_id, region, ip, latency, success, error FROM check_history ORDER BY id DESC LIMIT ?
-	) ORDER BY id ASC`, limit)
+	query := `SELECT time, profile_id, region, ip, latency, success, error FROM check_history ORDER BY id ASC`
+	args := []interface{}{}
+	if limit > 0 {
+		query = `SELECT time, profile_id, region, ip, latency, success, error FROM (
+			SELECT id, time, profile_id, region, ip, latency, success, error FROM check_history ORDER BY id DESC LIMIT ?
+		) ORDER BY id ASC`
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -260,10 +272,38 @@ func (s *runtimeStore) replaceSamples(samples []IPSample) error {
 	return tx.Commit()
 }
 
+func (s *runtimeStore) appendSamples(samples []IPSample) error {
+	if len(samples) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT INTO ip_samples(time, agent_id, agent_name, carrier, carrier_label, probe_source, profile_id, profile_name, region, region_label, ip, latency, jitter, loss_rate, score, success, error) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, sample := range samples {
+		if _, err := stmt.Exec(timeText(sample.Time), sample.AgentID, sample.AgentName, sample.Carrier, sample.CarrierLabel, sample.ProbeSource, sample.ProfileID, sample.ProfileName, sample.Region, sample.RegionLabel, sample.IP, sample.Latency, sample.Jitter, sample.LossRate, sample.Score, boolInt(sample.Success), sample.Error); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *runtimeStore) loadSamples(limit int) ([]IPSample, error) {
-	rows, err := s.db.Query(`SELECT time, agent_id, agent_name, carrier, carrier_label, probe_source, profile_id, profile_name, region, region_label, ip, latency, jitter, loss_rate, score, success, error FROM (
-		SELECT id, time, agent_id, agent_name, carrier, carrier_label, probe_source, profile_id, profile_name, region, region_label, ip, latency, jitter, loss_rate, score, success, error FROM ip_samples ORDER BY id DESC LIMIT ?
-	) ORDER BY id ASC`, limit)
+	query := `SELECT time, agent_id, agent_name, carrier, carrier_label, probe_source, profile_id, profile_name, region, region_label, ip, latency, jitter, loss_rate, score, success, error FROM ip_samples ORDER BY id ASC`
+	args := []interface{}{}
+	if limit > 0 {
+		query = `SELECT time, agent_id, agent_name, carrier, carrier_label, probe_source, profile_id, profile_name, region, region_label, ip, latency, jitter, loss_rate, score, success, error FROM (
+			SELECT id, time, agent_id, agent_name, carrier, carrier_label, probe_source, profile_id, profile_name, region, region_label, ip, latency, jitter, loss_rate, score, success, error FROM ip_samples ORDER BY id DESC LIMIT ?
+		) ORDER BY id ASC`
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
