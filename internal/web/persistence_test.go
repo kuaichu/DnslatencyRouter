@@ -34,7 +34,7 @@ func TestUpdateIPLifecyclesKeepsOriginalFirstSeen(t *testing.T) {
 	}
 }
 
-func TestPruneSamplesKeepsSevenDayWindowWithoutCountCap(t *testing.T) {
+func TestPruneSamplesKeepsThirtyDayWindowWithoutCountCap(t *testing.T) {
 	now := time.Now()
 	samples := make([]IPSample, 2500)
 	for i := range samples {
@@ -49,5 +49,18 @@ func TestPruneSamplesKeepsSevenDayWindowWithoutCountCap(t *testing.T) {
 	pruned := pruneSamples(samples)
 	if len(pruned) != len(samples) {
 		t.Fatalf("samples were capped by count: got %d, want %d", len(pruned), len(samples))
+	}
+}
+
+func TestPruneSamplesDropsOlderThanThirtyDays(t *testing.T) {
+	now := time.Now()
+	samples := []IPSample{
+		{Time: now.Add(-29 * 24 * time.Hour), IP: "34.96.159.37", Latency: 30, Success: true},
+		{Time: now.Add(-31 * 24 * time.Hour), IP: "34.96.143.153", Latency: 40, Success: true},
+	}
+
+	pruned := pruneSamples(samples)
+	if len(pruned) != 1 || pruned[0].IP != "34.96.159.37" {
+		t.Fatalf("unexpected pruned samples: %#v", pruned)
 	}
 }

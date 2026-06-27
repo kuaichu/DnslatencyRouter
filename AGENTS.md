@@ -122,7 +122,7 @@ Main modules:
 
 Handled in `internal/web/persistence.go`.
 
-- Logs, history, and samples are retained for a 7-day sliding window
+- Logs, history, and samples are retained for a 30-day sliding window
 - Each dataset also has a hard cap of 2000 entries
 - Data is stored under `data/`
 - Old IP analytics naturally age out through sample retention
@@ -149,7 +149,7 @@ Implemented in `internal/web/server.go` and `persistence.go`.
 - Historical IPs not in the latest DNS result become `status: "orphaned"`
 - Orphaned IPs are visually demoted in the UI and sorted below active IPs
 - They are not actively re-probed because new probe rounds only target the latest resolved IPs
-- Their historical samples remain visible until they age out of the 7-day window
+- Their historical samples remain visible until they age out of the 30-day window
 
 ## Config Editing
 

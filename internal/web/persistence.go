@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	retentionWindow    = 7 * 24 * time.Hour
+	retentionWindow    = 30 * 24 * time.Hour
 	maxLogEntries      = 2000
 	maxHistoryAPIItems = 2000
 	maxSampleAPIItems  = 5000
