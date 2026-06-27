@@ -701,6 +701,7 @@ func (s *Server) geoLabel(ip string) string {
 }
 
 func (s *Server) ensureGeoForIPs(ips []string) {
+	targets := make([]string, 0, len(ips))
 	for _, ip := range ips {
 		if !isPublicIPv4(ip) {
 			continue
@@ -717,7 +718,13 @@ func (s *Server) ensureGeoForIPs(ips []string) {
 		s.geoPending[ip] = true
 		s.geoMu.Unlock()
 
-		go func(target string) {
+		targets = append(targets, ip)
+	}
+	if len(targets) == 0 {
+		return
+	}
+	go func(items []string) {
+		for i, target := range items {
 			info := s.fetchGeoInfo(target)
 			s.geoMu.Lock()
 			delete(s.geoPending, target)
@@ -725,8 +732,11 @@ func (s *Server) ensureGeoForIPs(ips []string) {
 				s.geoCache[target] = info
 			}
 			s.geoMu.Unlock()
-		}(ip)
-	}
+			if i < len(items)-1 {
+				time.Sleep(1500 * time.Millisecond)
+			}
+		}
+	}(targets)
 }
 
 func geoInfoUseful(info GeoInfo) bool {
