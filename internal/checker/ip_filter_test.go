@@ -34,10 +34,11 @@ func TestFilterUsableCandidateIPsKeepsPublicIPv4(t *testing.T) {
 		"34.96.159.37",
 		"34.96.159.37",
 		"56.69.116.30",
+		"56.155.39.87",
 		"10.0.0.1",
 	})
 
-	want := []string{"34.96.159.37", "56.69.116.30"}
+	want := []string{"34.96.159.37", "56.69.116.30", "56.155.39.87"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

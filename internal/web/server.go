@@ -193,7 +193,7 @@ func New(port int, cfgPath string, triggerCh chan<- struct{}, onConfig func(targ
 		agentReports:         make(map[string]agent.Report),
 		geoCache:             make(map[string]GeoInfo),
 		geoPending:           make(map[string]bool),
-		geoClient:            &http.Client{Timeout: 4 * time.Second},
+		geoClient:            &http.Client{Timeout: 3 * time.Second},
 	}
 	stateDir := filepath.Join(filepath.Dir(cfgPath), "data")
 	s.dbPath = filepath.Join(stateDir, "runtime.db")
@@ -282,18 +282,11 @@ func (s *Server) SetTimePenaltyConfig(startHour, endHour int, score float64, key
 }
 
 func (s *Server) SetGeoProxy(proxyURL string) {
-	proxyURL = strings.TrimSpace(proxyURL)
-	transport := &http.Transport{}
-	if proxyURL != "" {
-		parsed, err := url.Parse(proxyURL)
-		if err != nil {
-			log.Printf("[geo] invalid proxy_url %q, geo lookup will use direct connection: %v", proxyURL, err)
-		} else {
-			transport.Proxy = http.ProxyURL(parsed)
-		}
+	if strings.TrimSpace(proxyURL) != "" {
+		log.Printf("[geo] proxy_url is ignored for IP geo lookup; using direct connection")
 	}
 	s.geoMu.Lock()
-	s.geoClient = &http.Client{Timeout: 4 * time.Second, Transport: transport}
+	s.geoClient = &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{}}
 	s.geoMu.Unlock()
 }
 
@@ -733,7 +726,7 @@ func (s *Server) ensureGeoForIPs(ips []string) {
 			}
 			s.geoMu.Unlock()
 			if i < len(items)-1 {
-				time.Sleep(1500 * time.Millisecond)
+				time.Sleep(600 * time.Millisecond)
 			}
 		}
 	}(targets)
@@ -753,7 +746,11 @@ func compactGeoLabel(country, city, isp string) string {
 		if location == "" {
 			location = city
 		} else if !strings.Contains(city, country) {
-			location += city
+			sep := " "
+			if containsCJK(location) || containsCJK(city) {
+				sep = ""
+			}
+			location += sep + city
 		} else {
 			location = city
 		}
@@ -767,6 +764,15 @@ func compactGeoLabel(country, city, isp string) string {
 	return location
 }
 
+func containsCJK(s string) bool {
+	for _, r := range s {
+		if (r >= '\u4e00' && r <= '\u9fff') || (r >= '\u3400' && r <= '\u4dbf') {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) geoHTTPClient() *http.Client {
 	s.geoMu.RLock()
 	client := s.geoClient
@@ -778,6 +784,22 @@ func (s *Server) geoHTTPClient() *http.Client {
 }
 
 func (s *Server) fetchGeoInfo(ip string) GeoInfo {
+	providers := []func(string) GeoInfo{
+		s.fetchGeoInfoFromIPSB,
+		s.fetchGeoInfoFromIPAPI,
+		s.fetchGeoInfoFromIPWhoIs,
+		s.fetchGeoInfoFromIPAPICo,
+	}
+	for _, provider := range providers {
+		info := provider(ip)
+		if geoInfoUseful(info) {
+			return info
+		}
+	}
+	return GeoInfo{IP: ip}
+}
+
+func (s *Server) fetchGeoInfoFromIPAPI(ip string) GeoInfo {
 	info := GeoInfo{IP: ip}
 	url := fmt.Sprintf("http://ip-api.com/json/%s?lang=zh-CN&fields=status,countryCode,country,city,isp", ip)
 	resp, err := s.geoHTTPClient().Get(url)
@@ -807,6 +829,127 @@ func (s *Server) fetchGeoInfo(ip string) GeoInfo {
 	info.Country = strings.TrimSpace(payload.Country)
 	info.City = strings.TrimSpace(payload.City)
 	info.ISP = strings.TrimSpace(payload.ISP)
+	info.Label = compactGeoLabel(info.Country, info.City, info.ISP)
+	return info
+}
+
+func (s *Server) fetchGeoInfoFromIPWhoIs(ip string) GeoInfo {
+	info := GeoInfo{IP: ip}
+	url := fmt.Sprintf("https://ipwho.is/%s?lang=zh-CN", ip)
+	resp, err := s.geoHTTPClient().Get(url)
+	if err != nil {
+		return info
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return info
+	}
+
+	var payload struct {
+		Success     bool   `json:"success"`
+		CountryCode string `json:"country_code"`
+		Country     string `json:"country"`
+		City        string `json:"city"`
+		Connection  struct {
+			ISP string `json:"isp"`
+			Org string `json:"org"`
+		} `json:"connection"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return info
+	}
+	if !payload.Success {
+		return info
+	}
+
+	info.CountryCode = strings.TrimSpace(payload.CountryCode)
+	info.Country = strings.TrimSpace(payload.Country)
+	info.City = strings.TrimSpace(payload.City)
+	info.ISP = strings.TrimSpace(payload.Connection.ISP)
+	if info.ISP == "" {
+		info.ISP = strings.TrimSpace(payload.Connection.Org)
+	}
+	info.Label = compactGeoLabel(info.Country, info.City, info.ISP)
+	return info
+}
+
+func (s *Server) fetchGeoInfoFromIPSB(ip string) GeoInfo {
+	info := GeoInfo{IP: ip}
+	url := fmt.Sprintf("https://api.ip.sb/geoip/%s", ip)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return info
+	}
+	req.Header.Set("User-Agent", "dns-latency-router")
+	resp, err := s.geoHTTPClient().Do(req)
+	if err != nil {
+		return info
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return info
+	}
+
+	var payload struct {
+		CountryCode     string `json:"country_code"`
+		Country         string `json:"country"`
+		City            string `json:"city"`
+		Region          string `json:"region"`
+		ISP             string `json:"isp"`
+		Organization    string `json:"organization"`
+		ASNOrganization string `json:"asn_organization"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return info
+	}
+
+	info.CountryCode = strings.TrimSpace(payload.CountryCode)
+	info.Country = strings.TrimSpace(payload.Country)
+	info.City = strings.TrimSpace(payload.City)
+	if info.City == "" {
+		info.City = strings.TrimSpace(payload.Region)
+	}
+	info.ISP = strings.TrimSpace(payload.ISP)
+	if info.ISP == "" {
+		info.ISP = strings.TrimSpace(payload.Organization)
+	}
+	if info.ISP == "" {
+		info.ISP = strings.TrimSpace(payload.ASNOrganization)
+	}
+	info.Label = compactGeoLabel(info.Country, info.City, info.ISP)
+	return info
+}
+
+func (s *Server) fetchGeoInfoFromIPAPICo(ip string) GeoInfo {
+	info := GeoInfo{IP: ip}
+	url := fmt.Sprintf("https://ipapi.co/%s/json/", ip)
+	resp, err := s.geoHTTPClient().Get(url)
+	if err != nil {
+		return info
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return info
+	}
+
+	var payload struct {
+		Error       bool   `json:"error"`
+		CountryCode string `json:"country_code"`
+		CountryName string `json:"country_name"`
+		City        string `json:"city"`
+		Org         string `json:"org"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return info
+	}
+	if payload.Error {
+		return info
+	}
+
+	info.CountryCode = strings.TrimSpace(payload.CountryCode)
+	info.Country = strings.TrimSpace(payload.CountryName)
+	info.City = strings.TrimSpace(payload.City)
+	info.ISP = strings.TrimSpace(payload.Org)
 	info.Label = compactGeoLabel(info.Country, info.City, info.ISP)
 	return info
 }
