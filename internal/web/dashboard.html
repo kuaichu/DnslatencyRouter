@@ -246,6 +246,8 @@ const ctx=els.canvas.getContext('2d');let latencyHistory=[],ipSamples=[],selecte
 function escapeHTML(v){return String(v).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
 function formatTime(v){return v?new Date(v).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'-'}
 function formatDate(v){return v?new Date(v).toLocaleDateString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit'}).replace(/\//g,'-'):'-'}
+function formatShortDate(v){return v?new Date(v).toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'}).replace(/\//g,'-'):'-'}
+function formatDateTime(v){return v?formatDate(v)+' '+formatTime(v):'-'}
 function formatSeconds(t){const s=Math.max(0,Number(t)||0);if(s<60)return s+' 秒';const m=Math.floor(s/60),r=s%60;return r?m+' 分 '+r+' 秒':m+' 分钟'}
 function formatMs(v){return v&&v > 0 ? v.toFixed(2)+' ms' : '-'}
 function formatCount(v){const n=Number(v)||0;if(n<1000)return String(n);return (n/1000).toFixed(1).replace(/\.0$/,'')+'K'}
@@ -320,7 +322,7 @@ els.chartFocus.textContent=selectedIP?'当前查看 '+selectedIP+' 的延迟表�
 chartPts=[];
 if(!data.length){els.chartEmpty.style.display='grid';return}
 els.chartEmpty.style.display='none';
-const pad={top:28,right:26,bottom:42,left:62},cw=w-pad.left-pad.right,ch=h-pad.top-pad.bottom,top=Math.ceil(Math.max(...data.map(r=>r.latency),10)*1.2/10)*10;
+const pad={top:28,right:26,bottom:52,left:62},cw=w-pad.left-pad.right,ch=h-pad.top-pad.bottom,top=Math.ceil(Math.max(...data.map(r=>r.latency),10)*1.2/10)*10;
 ctx.lineWidth=1;
 ctx.font='12px Cascadia Code, Consolas, monospace';
 for(let i=0;i<=4;i++){
@@ -392,7 +394,11 @@ ctx.fillStyle='rgba(201,217,226,.58)';
 ctx.font='12px Cascadia Code, Consolas, monospace';
 ctx.textAlign='center';
 const step=Math.max(1,Math.ceil(chartPts.length/6));
-for(let i=0;i<chartPts.length;i+=step)ctx.fillText(formatTime(chartPts[i].time).slice(0,5),chartPts[i].x,h-16);
+for(let i=0;i<chartPts.length;i+=step){
+const p=chartPts[i];
+ctx.fillText(formatShortDate(p.time),p.x,h-24);
+ctx.fillText(formatTime(p.time).slice(0,5),p.x,h-10)
+}
 if(!compact&&hoveredIdx>=0&&chartPts[hoveredIdx]){
 const p=chartPts[hoveredIdx];
 ctx.strokeStyle='rgba(105,183,255,.45)';
@@ -402,7 +408,7 @@ ctx.moveTo(p.x,pad.top);
 ctx.lineTo(p.x,pad.top+ch);
 ctx.stroke();
 ctx.setLineDash([]);
-const tw=190,th=78;
+const tw=218,th=92;
 let tx=p.x+14,ty=p.y-th-12;
 if(tx+tw>w-12)tx=p.x-tw-14;
 if(ty<12)ty=p.y+16;
@@ -417,8 +423,8 @@ ctx.font='700 13px Cascadia Code, Consolas, monospace';
 ctx.fillText(p.latency.toFixed(2)+' ms',tx+14,ty+24);
 ctx.fillStyle='rgba(201,217,226,.64)';
 ctx.font='12px Cascadia Code, Consolas, monospace';
-ctx.fillText(formatTime(p.time),tx+14,ty+46);
-ctx.fillText(p.ip||'-',tx+14,ty+64)
+ctx.fillText(formatDateTime(p.time),tx+14,ty+46);
+ctx.fillText(p.ip||'-',tx+14,ty+66)
 }}
 function updateStatus(s){
 renderAgents(s);
