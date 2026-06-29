@@ -103,6 +103,10 @@ img.region-flag{display:block;object-fit:cover;background:rgba(255,255,255,.08)}
 @media(max-width:680px){.region-hero-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.route-ip{font-size:22px}.route-line strong{font-size:18px}.region-address{align-items:flex-start;flex-wrap:wrap}.region-address .region-domain{flex:1 1 100%}.region-card[data-tooltip]:hover:after{left:8px;right:8px}}
 </style>
 <style>
+.panel.ip-section{overflow:visible;z-index:5}
+.ip-section .ip-filter-bar{position:relative;z-index:12}
+.ip-section .ip-menu-list{z-index:60}
+.ip-section .ip-groups{position:relative;z-index:1}
 .ip-card.timeout{border-color:rgba(245,158,11,.28);background:rgba(245,158,11,.055)}
 .ip-status-tag.timeout{background:rgba(245,158,11,.16);color:#fbbf24}
 .chart-ip-btn.timeout{border-color:rgba(245,158,11,.22);background:rgba(245,158,11,.08);color:#f8d08a}
@@ -155,7 +159,7 @@ img.region-flag{display:block;object-fit:cover;background:rgba(255,255,255,.08)}
       <div class="chart-toolbar"><div class="chart-ip-list" id="chartIpList"></div><div class="chart-focus" id="chartFocus">默认显示延迟最低的节点</div></div>
       <div class="chart-wrap"><canvas id="latencyChart"></canvas><div class="empty-state" id="chartEmpty">暂无历史数据，点击「立即检测」跑第一轮。</div></div>
     </section>
-    <section class="panel section" style="margin-top:18px">
+    <section class="panel section ip-section" style="margin-top:18px">
       <div class="section-title"><div><h2>IP 表现</h2><p>基于最近 30 天的解析与探测样本，观察每个 IP 在你本地网络下的延迟稳定性。</p></div><span class="sub-chip shrink-0 whitespace-nowrap" id="ipStatsCount">0 个 IP</span></div>
       <div class="ip-stats-shell" id="ipStats"></div>
     </section>
