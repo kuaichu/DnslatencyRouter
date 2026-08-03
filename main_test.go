@@ -1,10 +1,35 @@
 package main
 
 import (
+	"bytes"
+	"log"
+	"regexp"
 	"testing"
 
 	"dns-latency-router/internal/config"
 )
+
+func TestConfigureLoggingUsesDateAndLocalTime(t *testing.T) {
+	originalFlags := log.Flags()
+	originalPrefix := log.Prefix()
+	originalWriter := log.Writer()
+	defer log.SetFlags(originalFlags)
+	defer log.SetPrefix(originalPrefix)
+	defer log.SetOutput(originalWriter)
+
+	var output bytes.Buffer
+	log.SetOutput(&output)
+	configureLogging()
+
+	if got, want := log.Flags(), log.Ldate|log.Ltime|log.Lmsgprefix; got != want {
+		t.Fatalf("log flags = %d, want %d", got, want)
+	}
+
+	log.Print("[test] message")
+	if got := output.String(); !regexp.MustCompile(`^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} \[test\] message\n$`).MatchString(got) {
+		t.Fatalf("log output = %q, want YYYY/MM/DD HH:MM:SS prefix", got)
+	}
+}
 
 func TestCarrierEntryRecordForGeneratesCarrierScopedEntryDomain(t *testing.T) {
 	cfg := &config.Config{BaseDomain: "ziher.eu.org"}

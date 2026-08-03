@@ -1397,9 +1397,13 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 	}
 }
 
-func main() {
-	log.SetFlags(log.Ltime | log.Lmsgprefix)
+func configureLogging() {
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmsgprefix)
 	log.SetPrefix("")
+}
+
+func main() {
+	configureLogging()
 
 	configPath := "config.yaml"
 	if len(os.Args) > 1 {
