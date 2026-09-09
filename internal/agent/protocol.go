@@ -60,5 +60,14 @@ type Report struct {
 	ProbeSource  string          `json:"probeSource"`
 	StartedAt    time.Time       `json:"startedAt"`
 	FinishedAt   time.Time       `json:"finishedAt"`
+	ReceivedAt   time.Time       `json:"receivedAt,omitempty"`
 	Profiles     []ProfileReport `json:"profiles"`
+}
+
+// FreshnessTime uses controller receipt time; FinishedAt supports older records.
+func (r Report) FreshnessTime() time.Time {
+	if !r.ReceivedAt.IsZero() {
+		return r.ReceivedAt
+	}
+	return r.FinishedAt
 }

@@ -9,10 +9,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"dns-latency-router/internal/checker"
 )
+
+// runtimeStoreErrorf deliberately bypasses the process logger. The logger in
+// the service is backed by AddLog, which persists through this file; reporting
+// a persistence failure through that logger would recursively enter AddLog and
+// can deadlock while the runtime store is busy.
+func runtimeStoreErrorf(format string, args ...interface{}) {
+	_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
 
 const (
 	retentionWindow    = 30 * 24 * time.Hour
@@ -20,6 +29,8 @@ const (
 	maxHistoryAPIItems = 2000
 	maxSampleAPIItems  = 5000
 )
+
+var jsonLogMu sync.Mutex
 
 type LogEntry struct {
 	Time time.Time `json:"time"`
@@ -100,7 +111,7 @@ func (s *Server) loadPersistedData() {
 	s.loadIPLifecycles()
 	if s.store != nil {
 		if err := s.store.prune(); err != nil {
-			log.Printf("[store] prune failed: %v", err)
+			runtimeStoreErrorf("[store] prune failed: %v", err)
 		}
 	}
 }
@@ -109,7 +120,7 @@ func (s *Server) loadLogs() []LogEntry {
 	if s.store != nil {
 		logs, err := s.store.loadLogs(maxLogEntries)
 		if err != nil {
-			log.Printf("[store] load logs failed: %v", err)
+			runtimeStoreErrorf("[store] load logs failed: %v", err)
 		}
 		if len(logs) == 0 {
 			logs = readJSONLines[LogEntry](s.logsPath)
@@ -119,13 +130,13 @@ func (s *Server) loadLogs() []LogEntry {
 			logs = pruneLogEntries(logs)
 			if len(logs) > 0 {
 				if err := s.store.replaceLogs(logs); err != nil {
-					log.Printf("[store] import logs failed: %v", err)
+					runtimeStoreErrorf("[store] import logs failed: %v", err)
 				}
 			}
 		} else {
 			logs = pruneLogEntries(logs)
 			if err := s.store.replaceLogs(logs); err != nil {
-				log.Printf("[store] prune logs failed: %v", err)
+				runtimeStoreErrorf("[store] prune logs failed: %v", err)
 			}
 		}
 		return logs
@@ -145,20 +156,20 @@ func (s *Server) loadHistory() []CheckRecord {
 	if s.store != nil {
 		hist, err := s.store.loadHistory(0)
 		if err != nil {
-			log.Printf("[store] load history failed: %v", err)
+			runtimeStoreErrorf("[store] load history failed: %v", err)
 		}
 		if len(hist) == 0 {
 			hist = readJSONArray[CheckRecord](s.historyPath)
 			hist = pruneHistory(hist)
 			if len(hist) > 0 {
 				if err := s.store.replaceHistory(hist); err != nil {
-					log.Printf("[store] import history failed: %v", err)
+					runtimeStoreErrorf("[store] import history failed: %v", err)
 				}
 			}
 		} else {
 			hist = pruneHistory(hist)
 			if err := s.store.replaceHistory(hist); err != nil {
-				log.Printf("[store] prune history failed: %v", err)
+				runtimeStoreErrorf("[store] prune history failed: %v", err)
 			}
 		}
 		return hist
@@ -175,20 +186,20 @@ func (s *Server) loadSamples() []IPSample {
 	if s.store != nil {
 		samples, err := s.store.loadSamples(0)
 		if err != nil {
-			log.Printf("[store] load samples failed: %v", err)
+			runtimeStoreErrorf("[store] load samples failed: %v", err)
 		}
 		if len(samples) == 0 {
 			samples = readJSONArray[IPSample](s.samplesPath)
 			samples = pruneSamples(samples)
 			if len(samples) > 0 {
 				if err := s.store.replaceSamples(samples); err != nil {
-					log.Printf("[store] import samples failed: %v", err)
+					runtimeStoreErrorf("[store] import samples failed: %v", err)
 				}
 			}
 		} else {
 			samples = pruneSamples(samples)
 			if err := s.store.replaceSamples(samples); err != nil {
-				log.Printf("[store] prune samples failed: %v", err)
+				runtimeStoreErrorf("[store] prune samples failed: %v", err)
 			}
 		}
 		return samples
@@ -207,7 +218,7 @@ func (s *Server) loadAgentReports() {
 	}
 	reports, err := s.store.loadAgentReports(0)
 	if err != nil {
-		log.Printf("[store] load agent reports failed: %v", err)
+		runtimeStoreErrorf("[store] load agent reports failed: %v", err)
 		return
 	}
 	s.agentReportsMu.Lock()
@@ -226,7 +237,7 @@ func (s *Server) loadActiveIPs() {
 	}
 	active, byProfile, err := s.store.loadActiveIPs()
 	if err != nil {
-		log.Printf("[store] load active IPs failed: %v", err)
+		runtimeStoreErrorf("[store] load active IPs failed: %v", err)
 		return
 	}
 	if len(active) == 0 && len(byProfile) == 0 {
@@ -244,7 +255,7 @@ func (s *Server) loadControllerCandidates() {
 	}
 	candidates, err := s.store.loadControllerCandidates()
 	if err != nil {
-		log.Printf("[store] load controller candidates failed: %v", err)
+		runtimeStoreErrorf("[store] load controller candidates failed: %v", err)
 		return
 	}
 	if len(candidates) == 0 {
@@ -260,7 +271,7 @@ func (s *Server) loadIPLifecycles() {
 	if s.store != nil {
 		loaded, err := s.store.loadIPLifecycles()
 		if err != nil {
-			log.Printf("[store] load IP lifecycles failed: %v", err)
+			runtimeStoreErrorf("[store] load IP lifecycles failed: %v", err)
 		} else {
 			records = loaded
 		}
@@ -273,7 +284,7 @@ func (s *Server) loadIPLifecycles() {
 	}
 	if s.store != nil && len(records) > 0 {
 		if err := s.store.replaceIPLifecycles(records); err != nil {
-			log.Printf("[store] seed IP lifecycles failed: %v", err)
+			runtimeStoreErrorf("[store] seed IP lifecycles failed: %v", err)
 		}
 	}
 	s.ipLifecyclesMu.Lock()
@@ -386,17 +397,42 @@ func recentSamples(samples []IPSample, limit int) []IPSample {
 }
 
 func (s *Server) persistLogs() {
+	jsonLogMu.Lock()
+	defer jsonLogMu.Unlock()
 	s.logBufMu.Lock()
 	logs := make([]LogEntry, len(s.logBuf))
 	copy(logs, s.logBuf)
 	s.logBufMu.Unlock()
 	if s.store != nil {
 		if err := s.store.replaceLogs(logs); err != nil {
-			log.Printf("[store] persist logs failed: %v", err)
+			runtimeStoreErrorf("[store] persist logs failed: %v", err)
 		}
 		return
 	}
 	_ = rewriteJSONLines(s.logsPath, logs)
+}
+
+// persistLogEntry is the hot path used for newly emitted log lines. SQLite
+// appends and compacts the bounded table in one transaction, avoiding a full
+// table rewrite for every line.
+func (s *Server) persistLogEntry(entry LogEntry) {
+	if s.store != nil {
+		if err := s.store.appendLog(entry); err != nil {
+			runtimeStoreErrorf("[store] append log failed: %v", err)
+		}
+		return
+	}
+	jsonLogMu.Lock()
+	defer jsonLogMu.Unlock()
+	// SQLite is the normal path and appends above. The legacy fallback rewrites
+	// the pruned in-memory snapshot so both the count cap and time retention are
+	// reflected on disk.
+	s.logBufMu.Lock()
+	logs := append([]LogEntry(nil), s.logBuf...)
+	s.logBufMu.Unlock()
+	if err := rewriteJSONLines(s.logsPath, logs); err != nil {
+		runtimeStoreErrorf("[store] persist log file failed: %v", err)
+	}
 }
 
 func (s *Server) persistHistory() {
@@ -406,7 +442,7 @@ func (s *Server) persistHistory() {
 	s.historyMu.Unlock()
 	if s.store != nil {
 		if err := s.store.replaceHistory(hist); err != nil {
-			log.Printf("[store] persist history failed: %v", err)
+			runtimeStoreErrorf("[store] persist history failed: %v", err)
 		}
 		return
 	}
@@ -416,10 +452,10 @@ func (s *Server) persistHistory() {
 func (s *Server) persistHistoryRecord(rec CheckRecord) {
 	if s.store != nil {
 		if err := s.store.appendHistory(rec); err != nil {
-			log.Printf("[store] append history failed: %v", err)
+			runtimeStoreErrorf("[store] append history failed: %v", err)
 		}
 		if err := s.store.prune(); err != nil {
-			log.Printf("[store] prune failed: %v", err)
+			runtimeStoreErrorf("[store] prune failed: %v", err)
 		}
 		return
 	}
@@ -433,7 +469,7 @@ func (s *Server) persistSamples() {
 	s.samplesMu.Unlock()
 	if s.store != nil {
 		if err := s.store.replaceSamples(samples); err != nil {
-			log.Printf("[store] persist samples failed: %v", err)
+			runtimeStoreErrorf("[store] persist samples failed: %v", err)
 		}
 		return
 	}
@@ -447,10 +483,10 @@ func (s *Server) persistSampleBatch(samples []IPSample, replace bool) {
 			return
 		}
 		if err := s.store.appendSamples(samples); err != nil {
-			log.Printf("[store] append samples failed: %v", err)
+			runtimeStoreErrorf("[store] append samples failed: %v", err)
 		}
 		if err := s.store.prune(); err != nil {
-			log.Printf("[store] prune failed: %v", err)
+			runtimeStoreErrorf("[store] prune failed: %v", err)
 		}
 		return
 	}
@@ -513,7 +549,7 @@ func (s *Server) updateIPLifecycles(samples []IPSample) {
 	s.ipLifecyclesMu.Unlock()
 	if s.store != nil {
 		if err := s.store.replaceIPLifecycles(snapshot); err != nil {
-			log.Printf("[store] persist IP lifecycles failed: %v", err)
+			runtimeStoreErrorf("[store] persist IP lifecycles failed: %v", err)
 		}
 	}
 }
