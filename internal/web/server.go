@@ -22,7 +22,7 @@ import (
 	"dns-latency-router/internal/config"
 )
 
-//go:embed dashboard.html console.html assets/flags/*
+//go:embed dashboard.html assets/flags/*
 var templateFS embed.FS
 
 const agentInstallerURL = "https://raw.githubusercontent.com/kuaichu/DnslatencyRouter/main/scripts/install-agent.sh"
@@ -211,8 +211,8 @@ func New(port int, cfgPath string, triggerCh chan<- struct{}) *Server {
 func (s *Server) Start() {
 	mux := http.NewServeMux()
 	mux.Handle("/assets/", http.FileServer(http.FS(templateFS)))
-	mux.HandleFunc("/console", s.handleConsole)
-	mux.HandleFunc("/console/", s.handleConsole)
+	mux.HandleFunc("/console", s.redirectLegacyConsole)
+	mux.HandleFunc("/console/", s.redirectLegacyConsole)
 	mux.HandleFunc("/", s.handleDashboard)
 	mux.HandleFunc("/api/status", s.handleAPIStatus)
 	mux.HandleFunc("/api/history", s.handleAPIHistory)
@@ -1036,20 +1036,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	tmpl.Execute(w, nil)
 }
 
-func (s *Server) handleConsole(w http.ResponseWriter, r *http.Request) {
+// Preserve bookmarks after consolidating the UI into the dashboard.
+func (s *Server) redirectLegacyConsole(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/console" && r.URL.Path != "/console/" {
 		http.NotFound(w, r)
 		return
 	}
-	tmpl, err := template.ParseFS(templateFS, "console.html")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-	w.Header().Set("Pragma", "no-cache")
-	tmpl.Execute(w, nil)
+	http.Redirect(w, r, "/", http.StatusMovedPermanently)
 }
 
 func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {

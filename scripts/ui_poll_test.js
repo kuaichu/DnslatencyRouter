@@ -23,105 +23,6 @@ function response(value) {
   return { json: async () => value };
 }
 
-async function testConsoleSampleGeneration() {
-  const state = {
-    selectedAgentID: 'remote-a', selectedProfileID: 'profile-a', selectedIP: '1.1.1.1',
-    sampleRequestSeq: 0, samples: []
-  };
-  let agent = { id: 'remote-a' };
-  let profile = { id: 'profile-a' };
-  const oldResponse = deferred();
-  const newResponse = deferred();
-  const urls = [];
-  const context = vm.createContext({
-    state,
-    currentAgent: () => agent,
-    currentProfile: () => profile,
-    drawChart: () => {},
-    fetch: url => { urls.push(url); return urls.length === 1 ? oldResponse.promise : newResponse.promise; },
-    URLSearchParams,
-    Promise,
-    console
-  });
-  vm.runInContext(sourceLine('internal/web/console.html', 'function sampleSelectionKey('), context);
-  vm.runInContext(sourceLine('internal/web/console.html', 'function chartSamples('), context);
-  vm.runInContext(sourceLine('internal/web/console.html', 'async function loadSamples('), context);
-
-  const oldLoad = context.loadSamples();
-  state.selectedIP = '2.2.2.2';
-  state.selectedProfileID = 'profile-b';
-  agent = { id: 'remote-b' };
-  profile = { id: 'profile-b' };
-  const newLoad = context.loadSamples();
-  newResponse.resolve(response([{ ip: '2.2.2.2' }]));
-  await newLoad;
-  oldResponse.resolve(response([{ ip: '1.1.1.1' }]));
-  await oldLoad;
-  assert.equal(JSON.stringify(state.samples), JSON.stringify([{ ip: '2.2.2.2' }]));
-  assert(!urls[0].includes('agent_id=') || urls[0].includes('agent_id=remote-a'));
-
-  state.selectedIP = '2.2.2.2';
-  state.selectedAgentID = 'remote-c';
-  state.selectedProfileID = 'profile-c';
-  agent = { id: 'remote-c' };
-  profile = { id: 'profile-c' };
-  assert.equal(JSON.stringify(context.chartSamples()), '[]', 'same IP with a different Agent/profile must hide old samples immediately');
-  state.selectedAgentID = 'remote-b';
-  state.selectedProfileID = 'profile-b';
-  agent = { id: 'remote-b' };
-  profile = { id: 'profile-b' };
-
-  state.selectedIP = '3.3.3.3';
-  agent = null;
-  profile = null;
-  state.selectedProfileID = '';
-  const localResponse = deferred();
-  context.fetch = url => { urls.push(url); return localResponse.promise; };
-  const localLoad = context.loadSamples();
-  assert(!urls.at(-1).includes('agent_id='), 'controller samples must omit agent_id');
-  assert(!urls.at(-1).includes('profile_id='), 'legacy controller samples must omit profile_id');
-  localResponse.resolve(response([{ ip: '3.3.3.3' }]));
-  await localLoad;
-  assert.equal(JSON.stringify(state.samples), JSON.stringify([{ ip: '3.3.3.3' }]));
-
-  state.samples = [{ ip: 'keep' }];
-  profile = { id: 'profile-b' };
-  state.selectedProfileID = 'profile-b';
-  state.selectedIP = '4.4.4.4';
-  const keyOnlyResponse = deferred();
-  context.fetch = () => keyOnlyResponse.promise;
-  const keyOnlyLoad = context.loadSamples();
-  state.selectedIP = '5.5.5.5';
-  keyOnlyResponse.resolve(response([{ ip: '4.4.4.4' }]));
-  await keyOnlyLoad;
-  assert.equal(JSON.stringify(state.samples), JSON.stringify([{ ip: 'keep' }]));
-
-  state.selectedIP = '6.6.6.6';
-  agent = { id: 'remote-a' };
-  const staleResponse = deferred();
-  const currentResponse = deferred();
-  let requestNumber = 0;
-  context.fetch = () => (++requestNumber === 1 ? staleResponse.promise : currentResponse.promise);
-  const staleLoad = context.loadSamples();
-  state.selectedIP = '7.7.7.7';
-  const currentLoad = context.loadSamples();
-  currentResponse.resolve(response([{ ip: '7.7.7.7' }]));
-  await currentLoad;
-  staleResponse.reject(new Error('old request failed'));
-  await staleLoad;
-  assert.equal(JSON.stringify(state.samples), JSON.stringify([{ ip: '7.7.7.7' }]));
-
-  state.selectedIP = '8.8.8.8';
-  const emptyInvalidation = deferred();
-  context.fetch = () => emptyInvalidation.promise;
-  const emptyLoad = context.loadSamples();
-  state.selectedIP = '';
-  await context.loadSamples();
-  emptyInvalidation.resolve(response([{ ip: '8.8.8.8' }]));
-  await emptyLoad;
-  assert.equal(JSON.stringify(state.samples), '[]', 'clearing the selection must invalidate the old response');
-}
-
 async function testDashboardSampleGeneration() {
   const oldResponse = deferred();
   const newResponse = deferred();
@@ -202,10 +103,10 @@ async function testSingleFlight(file, marker, setup) {
   vm.runInContext(sourceLine(file, marker), context);
   const first = context.pollOnce();
   const second = context.pollOnce();
-  assert.equal(calls, file.includes('dashboard') ? 5 : 5, `${file} poll must be single-flight`);
+  assert.equal(calls, 5, `${file} poll must be single-flight`);
   gate.resolve(response([]));
   await Promise.all([first, second]);
-  assert.equal(file.includes('console') ? context.state.pollInFlight : context.pollInFlight, false, `${file} poll must release its flight guard`);
+  assert.equal(context.pollInFlight, false, `${file} poll must release its flight guard`);
   const next = context.pollOnce();
   assert.equal(calls, 10, `${file} poll must run again after completion`);
   gate.resolve(response([]));
@@ -213,11 +114,7 @@ async function testSingleFlight(file, marker, setup) {
 }
 
 (async () => {
-  await testConsoleSampleGeneration();
   await testDashboardSampleGeneration();
-  await testSingleFlight('internal/web/console.html', 'async function pollOnce(', {
-    state: { selectedIP: '', samples: [] }, renderTop: () => {}, renderAll: () => {}, loadSamples: async () => {}
-  });
   await testSingleFlight('internal/web/dashboard.html', 'async function pollOnce(', {
     selectedIP: '', setStatus: () => {}, updateStatus: () => {}, refreshProfileView: () => {},
     loadSelectedSamples: async () => {}, renderLogs: () => {}, getCurrentProfile: () => null
