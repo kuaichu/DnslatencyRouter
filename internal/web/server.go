@@ -7,9 +7,7 @@ import (
 	"html/template"
 	"io"
 	"log"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -114,6 +112,7 @@ type Server struct {
 	historyMu             sync.Mutex
 	samples               []IPSample
 	samplesMu             sync.Mutex
+	samplePersistMu       sync.Mutex
 	ipLifecycles          map[string]IPLifecycle
 	ipLifecyclesMu        sync.RWMutex
 	sseClients            map[string]chan sseEvent
@@ -121,10 +120,9 @@ type Server struct {
 	sseNextID             int64
 	httpServer            *http.Server
 	readyCh               chan struct{}
-	cfgPath               string                                                                                                                                                                                                                                                                                                                                                                               // for persisting config changes
-	onConfig              func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string) // callback to notify main loop
-	onProfiles            func(*config.Config)
-	onCloudflare          func(config.CloudflareConfig)
+	cfgPath               string
+	configMu              sync.Mutex
+	onConfigApplied       func(*config.Config)
 	triggerCh             chan<- struct{} // signal main loop to run a check immediately
 	logBuf                []LogEntry
 	logBufMu              sync.Mutex
@@ -176,14 +174,12 @@ type GeoInfo struct {
 
 // New creates a web server.
 // cfgPath is the path to config.yaml for persisting changes.
-// onConfig is called when the user updates target_domain or custom_domain via the web UI.
-func New(port int, cfgPath string, triggerCh chan<- struct{}, onConfig func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string)) *Server {
+func New(port int, cfgPath string, triggerCh chan<- struct{}) *Server {
 	s := &Server{
 		port:                 port,
 		sseClients:           make(map[string]chan sseEvent),
 		readyCh:              make(chan struct{}),
 		cfgPath:              cfgPath,
-		onConfig:             onConfig,
 		triggerCh:            triggerCh,
 		ipLifecycles:         make(map[string]IPLifecycle),
 		activeIPs:            make(map[string]bool),
@@ -290,16 +286,10 @@ func (s *Server) SetGeoProxy(proxyURL string) {
 	s.geoMu.Unlock()
 }
 
-func (s *Server) SetProfilesCallback(cb func(*config.Config)) {
-	s.runtimeCfgMu.Lock()
-	s.onProfiles = cb
-	s.runtimeCfgMu.Unlock()
-}
-
-func (s *Server) SetCloudflareCallback(cb func(config.CloudflareConfig)) {
-	s.runtimeCfgMu.Lock()
-	s.onCloudflare = cb
-	s.runtimeCfgMu.Unlock()
+// SetConfigCallback must be called before Start. The callback receives a complete
+// configuration and must queue it for application between probe cycles.
+func (s *Server) SetConfigCallback(cb func(*config.Config)) {
+	s.onConfigApplied = cb
 }
 
 func (s *Server) safeguards() (int, string, string) {
@@ -316,15 +306,31 @@ func (s *Server) timePenaltyConfig() (int, int, float64, string) {
 
 // --- Status updates (called by main loop) ---
 
-// GetStatus returns the current status copy.
-func (s *Server) GetStatus() *Status {
-	return s.status.Load().(*Status)
+func cloneStatus(st *Status) *Status {
+	if st == nil {
+		return &Status{}
+	}
+	next := *st
+	next.Agents = append([]AgentStatus(nil), st.Agents...)
+	next.Profiles = append([]ProfileStatus(nil), st.Profiles...)
+	for i := range next.Profiles {
+		next.Profiles[i].TargetDomains = append([]string(nil), st.Profiles[i].TargetDomains...)
+		next.Profiles[i].Regions = append([]RegionStatus(nil), st.Profiles[i].Regions...)
+	}
+	return &next
 }
 
-// UpdateStatus sets the current status and broadcasts via SSE.
+// GetStatus returns an independent snapshot, including nested slices.
+func (s *Server) GetStatus() *Status {
+	st, _ := s.status.Load().(*Status)
+	return cloneStatus(st)
+}
+
+// UpdateStatus publishes an immutable copy so callers can reuse their snapshot.
 func (s *Server) UpdateStatus(st *Status) {
-	s.status.Store(st)
-	s.broadcast("status", mustJSON(st))
+	next := cloneStatus(st)
+	s.status.Store(next)
+	s.broadcast("status", mustJSON(next))
 }
 
 // AddHistory appends a check record and broadcasts the full history.
@@ -345,7 +351,7 @@ func (s *Server) AddLog(line string) {
 	s.logBuf = append(s.logBuf, entry)
 	s.logBuf = pruneLogEntries(s.logBuf)
 	s.logBufMu.Unlock()
-	s.persistLogs()
+	s.persistLogEntry(entry)
 	s.broadcast("log", mustJSON(entry))
 }
 
@@ -355,6 +361,7 @@ func (s *Server) AddSamples(samples []IPSample) {
 	if len(samples) == 0 {
 		return
 	}
+	s.samplePersistMu.Lock()
 	s.updateIPLifecycles(samples)
 	s.samplesMu.Lock()
 	s.samples = append(s.samples, samples...)
@@ -362,6 +369,7 @@ func (s *Server) AddSamples(samples []IPSample) {
 	pruned := s.pruneInactiveOrphanSamplesLocked()
 	s.samplesMu.Unlock()
 	s.persistSampleBatch(samples, pruned)
+	s.samplePersistMu.Unlock()
 	s.ensureGeoForIPs(sampleIPs(samples))
 	if pruned {
 		log.Printf("[gc] runtime sample store compacted after orphan inactivity pruning")
@@ -1045,9 +1053,9 @@ func (s *Server) handleConsole(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIStatus(w http.ResponseWriter, r *http.Request) {
-	st := *s.status.Load().(*Status)
+	st := s.GetStatus()
 	st.Agents = s.AgentStatuses(0)
-	writeJSON(w, &st)
+	writeJSON(w, st)
 }
 
 func (s *Server) handleAPIHistory(w http.ResponseWriter, r *http.Request) {
@@ -1491,6 +1499,8 @@ func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	report = sanitizeAgentReportCandidates(normalizeAgentReportWithAssignments(report, s.agentAssignments()))
+	// Never trust a client-supplied receipt timestamp.
+	report.ReceivedAt = time.Now()
 	if report.FinishedAt.IsZero() {
 		report.FinishedAt = time.Now()
 	}
@@ -1514,7 +1524,7 @@ func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
 	}
 	s.AddSamples(agentSamplesFromReport(report))
 
-	st := s.status.Load().(*Status)
+	st := s.GetStatus()
 	st.Agents = s.AgentStatuses(0)
 	s.UpdateStatus(st)
 
@@ -1590,15 +1600,16 @@ func (s *Server) AgentReports(ttl time.Duration) []agent.Report {
 			return out
 		}
 	}
+	now := time.Now()
 	var cutoff time.Time
 	if filterTTL > 0 {
-		cutoff = time.Now().Add(-filterTTL)
+		cutoff = now.Add(-filterTTL)
 	}
 	s.agentReportsMu.RLock()
 	defer s.agentReportsMu.RUnlock()
 	reports := make([]agent.Report, 0, len(s.agentReports))
 	for _, report := range s.agentReports {
-		if !cutoff.IsZero() && !report.FinishedAt.IsZero() && report.FinishedAt.Before(cutoff) {
+		if stamp := report.FreshnessTime(); stamp.IsZero() || stamp.After(now) || (!cutoff.IsZero() && stamp.Before(cutoff)) {
 			continue
 		}
 		reports = append(reports, normalizeAgentReportWithAssignments(report, assignments))
@@ -1664,18 +1675,18 @@ func (s *Server) AgentStatuses(ttl time.Duration) []AgentStatus {
 		if strings.TrimSpace(status.ProbeSource) == "" && strings.TrimSpace(report.ProbeSource) != "" {
 			status.ProbeSource = strings.TrimSpace(report.ProbeSource)
 		}
-		status.LastSeen = report.FinishedAt
+		status.LastSeen = report.FreshnessTime()
 		status.ProfileCount = len(report.Profiles)
 		status.AgeSeconds = 0
 		status.Status = "offline"
-		if !report.FinishedAt.IsZero() {
-			status.AgeSeconds = int(now.Sub(report.FinishedAt).Seconds())
+		if !report.FreshnessTime().IsZero() {
+			status.AgeSeconds = int(now.Sub(report.FreshnessTime()).Seconds())
 			if status.AgeSeconds < 0 {
 				status.AgeSeconds = 0
 			}
 			status.Status = "online"
 		}
-		if !report.FinishedAt.IsZero() && report.FinishedAt.Before(cutoff) {
+		if !report.FreshnessTime().IsZero() && report.FreshnessTime().Before(cutoff) {
 			status.Status = "stale"
 		}
 		statusesByID[id] = status
@@ -1776,824 +1787,6 @@ func profileLookup(profiles []config.AirportProfile) map[string]config.AirportPr
 	return out
 }
 
-func (s *Server) handleAPIAirportProfiles(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "GET" {
-		cfg, err := config.Load(s.cfgPath)
-		if err != nil {
-			writeJSON(w, map[string]string{"error": "load config: " + err.Error()})
-			return
-		}
-		profiles := make([]airportProfilePayload, 0, len(cfg.AirportProfiles))
-		for _, profile := range cfg.AirportProfiles {
-			profiles = append(profiles, airportProfileToPayload(profile))
-		}
-		writeJSON(w, airportProfilesResponse{BaseDomain: cfg.BaseDomain, Profiles: profiles})
-		return
-	}
-
-	if r.Method != "POST" {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var body airportProfilesRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, map[string]string{"error": "invalid JSON: " + err.Error()})
-		return
-	}
-
-	current, err := config.Load(s.cfgPath)
-	if err != nil {
-		writeJSON(w, map[string]string{"error": "load config: " + err.Error()})
-		return
-	}
-
-	next := *current
-	if body.BaseDomain != nil {
-		next.BaseDomain = strings.TrimSpace(*body.BaseDomain)
-	}
-	existing := profileLookup(current.AirportProfiles)
-	nextProfiles := make([]config.AirportProfile, 0, len(body.Profiles))
-	for i, incoming := range body.Profiles {
-		id := strings.TrimSpace(incoming.ID)
-		slug := strings.TrimSpace(incoming.Slug)
-		name := strings.TrimSpace(incoming.Name)
-		if slug == "" {
-			slug = id
-		}
-		key := strings.ToLower(id)
-		if key == "" {
-			key = strings.ToLower(slug)
-		}
-		prev := existing[key]
-		if prev.ID == "" && slug != "" {
-			prev = existing[strings.ToLower(slug)]
-		}
-		entry := prev.EntryRecord
-		if entry.Label == "" {
-			entry.Label = "全局最快"
-		}
-		profile := config.AirportProfile{
-			ID:             id,
-			Name:           name,
-			Slug:           slug,
-			TargetDomains:  incoming.TargetDomains,
-			ProbeSource:    strings.TrimSpace(incoming.ProbeSource),
-			Carrier:        config.NormalizeCarrier(incoming.Carrier),
-			EntryRecord:    entry,
-			RegionRecords:  prev.RegionRecords,
-			CarrierRecords: prev.CarrierRecords,
-		}
-		if len(profile.TargetDomains) == 0 {
-			writeJSON(w, map[string]string{"error": fmt.Sprintf("airport_profiles[%d] 至少需要一个入口域名", i+1)})
-			return
-		}
-		nextProfiles = append(nextProfiles, profile)
-	}
-	if len(nextProfiles) == 0 {
-		writeJSON(w, map[string]string{"error": "至少保留一个机场配置"})
-		return
-	}
-	next.AirportProfiles = nextProfiles
-	if err := next.Normalize(); err != nil {
-		writeJSON(w, map[string]string{"error": "配置校验失败: " + err.Error()})
-		return
-	}
-	if err := config.Save(s.cfgPath, &next); err != nil {
-		writeJSON(w, map[string]string{"error": "保存失败: " + err.Error()})
-		return
-	}
-	latest, err := config.Load(s.cfgPath)
-	if err != nil {
-		writeJSON(w, map[string]string{"error": "重新加载失败: " + err.Error()})
-		return
-	}
-	if s.onProfiles != nil {
-		s.onProfiles(latest)
-	}
-
-	st := s.status.Load().(*Status)
-	st.Profiles = buildProfileStatuses(latest)
-	if len(st.Profiles) > 0 {
-		st.TargetDomain = st.Profiles[0].TargetDomain
-		st.CustomDomain = ""
-		if len(st.Profiles[0].Regions) > 0 {
-			st.CustomDomain = st.Profiles[0].Regions[0].CustomDomain
-		}
-		st.ProbeSource = st.Profiles[0].ProbeSource
-		st.Carrier = st.Profiles[0].Carrier
-		st.CarrierLabel = st.Profiles[0].CarrierLabel
-	}
-	s.UpdateStatus(st)
-	writeJSON(w, map[string]bool{"ok": true})
-}
-
-func buildProfileStatuses(cfg *config.Config) []ProfileStatus {
-	profiles := make([]ProfileStatus, 0, len(cfg.AirportProfiles))
-	for _, profile := range cfg.AirportProfiles {
-		regions := make([]RegionStatus, 0, len(profile.RegionRecords)+len(profile.CarrierRecords)+1)
-		if profile.EntryRecord.CustomDomain != "" || profile.EntryRecord.RecordID != "" {
-			label := profile.EntryRecord.Label
-			if label == "" {
-				label = "全局最快"
-			}
-			regions = append(regions, RegionStatus{
-				Region:       "entry",
-				Label:        label,
-				CustomDomain: profile.EntryRecord.CustomDomain,
-				Status:       "no_candidate",
-			})
-		}
-		for carrier, rec := range profile.CarrierRecords {
-			label := rec.Label
-			if label == "" {
-				label = config.CarrierLabel(carrier)
-			}
-			regions = append(regions, RegionStatus{
-				Region:       "carrier-" + carrier,
-				Label:        label,
-				CustomDomain: rec.CustomDomain,
-				Status:       "no_candidate",
-			})
-		}
-		profiles = append(profiles, ProfileStatus{
-			ID:            profile.ID,
-			Name:          profile.Name,
-			Slug:          profile.Slug,
-			TargetDomain:  profile.TargetDomain,
-			TargetDomains: append([]string(nil), profile.TargetDomains...),
-			ProbeSource:   profile.ProbeSource,
-			Carrier:       profile.Carrier,
-			CarrierLabel:  config.EffectiveCarrierLabelFor(profile.Carrier, profile.ProbeSource),
-			Regions:       regions,
-		})
-	}
-	return profiles
-}
-
-func (s *Server) handleAPIConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "GET" {
-		st := s.status.Load().(*Status)
-		ttlHours, fallbackIP, webhookURL := s.safeguards()
-		timePenaltyStartHour, timePenaltyEndHour, timePenaltyScore, timePenaltyKeywords := s.timePenaltyConfig()
-		payload := map[string]interface{}{
-			"target_domain":              st.TargetDomain,
-			"custom_domain":              st.CustomDomain,
-			"probe_source":               st.ProbeSource,
-			"carrier":                    st.Carrier,
-			"carrier_label":              st.CarrierLabel,
-			"ping_mode":                  st.PingMode,
-			"ping_port":                  st.PingPort,
-			"check_interval":             st.CheckIntervalSec,
-			"ping_attempts":              st.PingAttempts,
-			"selection_latency_weight":   st.LatencyWeight,
-			"selection_jitter_weight":    st.JitterWeight,
-			"selection_loss_weight":      st.LossWeight,
-			"switch_improvement_percent": st.SwitchImprovement,
-			"switch_stable_seconds":      st.SwitchStableSec,
-			"failed_orphan_ttl_hours":    ttlHours,
-			"fallback_baseline_ip":       fallbackIP,
-			"alert_webhook_url":          webhookURL,
-			"time_penalty_start_hour":    timePenaltyStartHour,
-			"time_penalty_end_hour":      timePenaltyEndHour,
-			"time_penalty_score":         timePenaltyScore,
-			"time_penalty_org_keywords":  timePenaltyKeywords,
-			"cloudflare_api_token_set":   false,
-			"cloudflare_zone_id":         "",
-			"cloudflare_record_id":       "",
-			"agent_controller_url":       "",
-			"agent_token_set":            false,
-			"agent_report_ttl_seconds":   900,
-			"agents":                     []agentPeerPayload{},
-			"agent_statuses":             []AgentStatus{},
-		}
-		if cfg, err := config.Load(s.cfgPath); err == nil {
-			payload["cloudflare_api_token_set"] = strings.TrimSpace(cfg.Cloudflare.APIToken) != ""
-			payload["cloudflare_zone_id"] = cfg.Cloudflare.ZoneID
-			payload["cloudflare_record_id"] = cfg.Cloudflare.RecordID
-			payload["agent_controller_url"] = cfg.Agent.ControllerURL
-			payload["agent_token_set"] = strings.TrimSpace(cfg.Agent.Token) != ""
-			payload["agent_report_ttl_seconds"] = cfg.Agent.ReportTTLSeconds
-			payload["agents"] = agentPeersToPayload(cfg.Agents)
-			payload["agent_statuses"] = s.AgentStatuses(0)
-		}
-		writeJSON(w, payload)
-		return
-	}
-
-	if r.Method != "POST" {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var body struct {
-		TargetDomain         *string             `json:"target_domain"`
-		CustomDomain         *string             `json:"custom_domain"`
-		ProbeSource          *string             `json:"probe_source"`
-		Carrier              *string             `json:"carrier"`
-		PingMode             *string             `json:"ping_mode"`
-		PingPort             *int                `json:"ping_port"`
-		CheckInterval        *int                `json:"check_interval"`
-		PingAttempts         *int                `json:"ping_attempts"`
-		LatencyWeight        *float64            `json:"selection_latency_weight"`
-		JitterWeight         *float64            `json:"selection_jitter_weight"`
-		LossWeight           *float64            `json:"selection_loss_weight"`
-		SwitchImprovement    *float64            `json:"switch_improvement_percent"`
-		SwitchStableSec      *int                `json:"switch_stable_seconds"`
-		FailedOrphanTTLHours *int                `json:"failed_orphan_ttl_hours"`
-		FallbackBaselineIP   *string             `json:"fallback_baseline_ip"`
-		AlertWebhookURL      *string             `json:"alert_webhook_url"`
-		TimePenaltyStartHour *int                `json:"time_penalty_start_hour"`
-		TimePenaltyEndHour   *int                `json:"time_penalty_end_hour"`
-		TimePenaltyScore     *float64            `json:"time_penalty_score"`
-		TimePenaltyKeywords  *string             `json:"time_penalty_org_keywords"`
-		CloudflareAPIToken   *string             `json:"cloudflare_api_token"`
-		CloudflareZoneID     *string             `json:"cloudflare_zone_id"`
-		CloudflareRecordID   *string             `json:"cloudflare_record_id"`
-		AgentControllerURL   *string             `json:"agent_controller_url"`
-		AgentToken           *string             `json:"agent_token"`
-		AgentReportTTL       *int                `json:"agent_report_ttl_seconds"`
-		Agents               *[]agentPeerPayload `json:"agents"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, map[string]string{"error": "invalid JSON: " + err.Error()})
-		return
-	}
-
-	st := s.status.Load().(*Status)
-	multiProfileMode := len(st.Profiles) > 0
-
-	// Build what changed
-	var newTarget, newCustom, newProbeSource, newCarrier, newPingMode, newFallbackBaselineIP, newAlertWebhookURL string
-	var newPingPort, newCheckInterval, newPingAttempts, newSwitchStableSec int
-	var newFailedOrphanTTLHours int
-	var newTimePenaltyStartHour, newTimePenaltyEndHour int
-	var newLatencyWeight, newJitterWeight, newLossWeight, newSwitchImprovement, newTimePenaltyScore float64
-	var newTimePenaltyKeywords string
-	var newAgentToken string
-	var newAgentControllerURL string
-	var newAgentReportTTL int
-	var nextAgentPeers []config.AgentPeerConfig
-	hasPingPort := false
-	hasCheckInterval := false
-	hasPingMode := false
-	hasCarrier := false
-	hasPingAttempts := false
-	hasLatencyWeight := false
-	hasJitterWeight := false
-	hasLossWeight := false
-	hasSwitchImprovement := false
-	hasSwitchStableSec := false
-	hasFailedOrphanTTLHours := false
-	hasFallbackBaselineIP := false
-	hasAlertWebhookURL := false
-	hasTimePenaltyStartHour := false
-	hasTimePenaltyEndHour := false
-	hasTimePenaltyScore := false
-	hasTimePenaltyKeywords := false
-	hasCloudflareAPIToken := false
-	hasCloudflareZoneID := false
-	hasCloudflareRecordID := false
-	hasAgentToken := false
-	hasAgentControllerURL := false
-	hasAgentReportTTL := false
-	hasAgentPeers := false
-
-	if !multiProfileMode && body.TargetDomain != nil && *body.TargetDomain != "" && *body.TargetDomain != st.TargetDomain {
-		newTarget = *body.TargetDomain
-	}
-	if !multiProfileMode && body.CustomDomain != nil && *body.CustomDomain != "" && *body.CustomDomain != st.CustomDomain {
-		newCustom = *body.CustomDomain
-	}
-	if !multiProfileMode && body.ProbeSource != nil && *body.ProbeSource != "" && *body.ProbeSource != st.ProbeSource {
-		newProbeSource = *body.ProbeSource
-	}
-	if !multiProfileMode && body.Carrier != nil {
-		candidate := config.NormalizeCarrier(*body.Carrier)
-		if candidate != st.Carrier {
-			newCarrier = candidate
-			hasCarrier = true
-		}
-	}
-	if body.PingMode != nil && *body.PingMode != "" && *body.PingMode != st.PingMode {
-		newPingMode = *body.PingMode
-		hasPingMode = true
-	}
-	if body.PingPort != nil && *body.PingPort > 0 && *body.PingPort != st.PingPort {
-		newPingPort = *body.PingPort
-		hasPingPort = true
-	}
-	if body.CheckInterval != nil && *body.CheckInterval > 0 && *body.CheckInterval != st.CheckIntervalSec {
-		newCheckInterval = *body.CheckInterval
-		hasCheckInterval = true
-	}
-	if body.PingAttempts != nil && *body.PingAttempts > 0 && *body.PingAttempts != st.PingAttempts {
-		newPingAttempts = *body.PingAttempts
-		hasPingAttempts = true
-	}
-	if body.LatencyWeight != nil && *body.LatencyWeight > 0 && *body.LatencyWeight != st.LatencyWeight {
-		newLatencyWeight = *body.LatencyWeight
-		hasLatencyWeight = true
-	}
-	if body.JitterWeight != nil && *body.JitterWeight >= 0 && *body.JitterWeight != st.JitterWeight {
-		newJitterWeight = *body.JitterWeight
-		hasJitterWeight = true
-	}
-	if body.LossWeight != nil && *body.LossWeight >= 0 && *body.LossWeight != st.LossWeight {
-		newLossWeight = *body.LossWeight
-		hasLossWeight = true
-	}
-	if body.SwitchImprovement != nil && *body.SwitchImprovement >= 0 && *body.SwitchImprovement != st.SwitchImprovement {
-		newSwitchImprovement = *body.SwitchImprovement
-		hasSwitchImprovement = true
-	}
-	if body.SwitchStableSec != nil && *body.SwitchStableSec >= 0 && *body.SwitchStableSec != st.SwitchStableSec {
-		newSwitchStableSec = *body.SwitchStableSec
-		hasSwitchStableSec = true
-	}
-	currentTTLHours, currentFallbackIP, currentWebhookURL := s.safeguards()
-	currentTimePenaltyStartHour, currentTimePenaltyEndHour, currentTimePenaltyScore, currentTimePenaltyKeywords := s.timePenaltyConfig()
-	cfgForCloudflare, cfgErr := config.Load(s.cfgPath)
-	if cfgErr != nil {
-		writeJSON(w, map[string]string{"error": "load config: " + cfgErr.Error()})
-		return
-	}
-	nextCloudflare := cfgForCloudflare.Cloudflare
-	if body.FailedOrphanTTLHours != nil && *body.FailedOrphanTTLHours >= 0 && *body.FailedOrphanTTLHours != currentTTLHours {
-		newFailedOrphanTTLHours = *body.FailedOrphanTTLHours
-		hasFailedOrphanTTLHours = true
-	}
-	if body.FallbackBaselineIP != nil {
-		candidate := strings.TrimSpace(*body.FallbackBaselineIP)
-		if candidate != currentFallbackIP {
-			newFallbackBaselineIP = candidate
-			hasFallbackBaselineIP = true
-		}
-	}
-	if body.AlertWebhookURL != nil {
-		candidate := strings.TrimSpace(*body.AlertWebhookURL)
-		if candidate != currentWebhookURL {
-			newAlertWebhookURL = candidate
-			hasAlertWebhookURL = true
-		}
-	}
-	if body.TimePenaltyStartHour != nil && *body.TimePenaltyStartHour != currentTimePenaltyStartHour {
-		newTimePenaltyStartHour = *body.TimePenaltyStartHour
-		hasTimePenaltyStartHour = true
-	}
-	if body.TimePenaltyEndHour != nil && *body.TimePenaltyEndHour != currentTimePenaltyEndHour {
-		newTimePenaltyEndHour = *body.TimePenaltyEndHour
-		hasTimePenaltyEndHour = true
-	}
-	if body.TimePenaltyScore != nil && *body.TimePenaltyScore != currentTimePenaltyScore {
-		newTimePenaltyScore = *body.TimePenaltyScore
-		hasTimePenaltyScore = true
-	}
-	if body.TimePenaltyKeywords != nil {
-		candidate := strings.TrimSpace(*body.TimePenaltyKeywords)
-		if candidate != currentTimePenaltyKeywords {
-			newTimePenaltyKeywords = candidate
-			hasTimePenaltyKeywords = true
-		}
-	}
-	if body.CloudflareAPIToken != nil {
-		candidate := strings.TrimSpace(*body.CloudflareAPIToken)
-		if candidate != "" && candidate != nextCloudflare.APIToken {
-			nextCloudflare.APIToken = candidate
-			hasCloudflareAPIToken = true
-		}
-	}
-	if body.CloudflareZoneID != nil {
-		candidate := strings.TrimSpace(*body.CloudflareZoneID)
-		if candidate != "" && candidate != nextCloudflare.ZoneID {
-			nextCloudflare.ZoneID = candidate
-			hasCloudflareZoneID = true
-		}
-	}
-	if body.CloudflareRecordID != nil {
-		candidate := strings.TrimSpace(*body.CloudflareRecordID)
-		if candidate != "" && candidate != nextCloudflare.RecordID {
-			nextCloudflare.RecordID = candidate
-			hasCloudflareRecordID = true
-		}
-	}
-	if body.AgentToken != nil {
-		candidate := strings.TrimSpace(*body.AgentToken)
-		if candidate != "" && candidate != cfgForCloudflare.Agent.Token {
-			newAgentToken = candidate
-			hasAgentToken = true
-		}
-	}
-	if body.AgentControllerURL != nil {
-		candidate := strings.TrimRight(strings.TrimSpace(*body.AgentControllerURL), "/")
-		if candidate != "" {
-			if _, err := url.ParseRequestURI(candidate); err != nil {
-				writeJSON(w, map[string]string{"error": "agent_controller_url is invalid: " + err.Error()})
-				return
-			}
-		}
-		if candidate != strings.TrimRight(strings.TrimSpace(cfgForCloudflare.Agent.ControllerURL), "/") {
-			newAgentControllerURL = candidate
-			hasAgentControllerURL = true
-		}
-	}
-	if body.AgentReportTTL != nil {
-		if *body.AgentReportTTL < 30 {
-			writeJSON(w, map[string]string{"error": "agent_report_ttl_seconds must be at least 30"})
-			return
-		}
-		if *body.AgentReportTTL != cfgForCloudflare.Agent.ReportTTLSeconds {
-			newAgentReportTTL = *body.AgentReportTTL
-			hasAgentReportTTL = true
-		}
-	}
-	if body.Agents != nil {
-		hasAgentPeers = true
-		nextAgentPeers = make([]config.AgentPeerConfig, 0, len(*body.Agents))
-		for _, incoming := range *body.Agents {
-			nextAgentPeers = append(nextAgentPeers, config.AgentPeerConfig{
-				ID:          strings.TrimSpace(incoming.ID),
-				Name:        strings.TrimSpace(incoming.Name),
-				ProbeSource: strings.TrimSpace(incoming.ProbeSource),
-				Carrier:     config.NormalizeCarrier(incoming.Carrier),
-			})
-		}
-	}
-
-	if newTarget == "" && newCustom == "" && newProbeSource == "" && !hasCarrier && !hasPingMode && !hasPingPort && !hasCheckInterval && !hasPingAttempts && !hasLatencyWeight && !hasJitterWeight && !hasLossWeight && !hasSwitchImprovement && !hasSwitchStableSec && !hasFailedOrphanTTLHours && !hasFallbackBaselineIP && !hasAlertWebhookURL && !hasTimePenaltyStartHour && !hasTimePenaltyEndHour && !hasTimePenaltyScore && !hasTimePenaltyKeywords && !hasCloudflareAPIToken && !hasCloudflareZoneID && !hasCloudflareRecordID && !hasAgentToken && !hasAgentControllerURL && !hasAgentReportTTL && !hasAgentPeers {
-		writeJSON(w, map[string]string{"error": "no changes or empty values"})
-		return
-	}
-
-	// Persist to config.yaml
-	if newTarget != "" {
-		if err := config.UpdateYAMLField(s.cfgPath, "target_domain", newTarget, true); err != nil {
-			writeJSON(w, map[string]string{"error": "persist target_domain: " + err.Error()})
-			return
-		}
-	}
-	if newCustom != "" {
-		if err := config.UpdateYAMLField(s.cfgPath, "custom_domain", newCustom, true); err != nil {
-			writeJSON(w, map[string]string{"error": "persist custom_domain: " + err.Error()})
-			return
-		}
-	}
-	if newProbeSource != "" {
-		if err := config.UpdateYAMLField(s.cfgPath, "probe_source", newProbeSource, true); err != nil {
-			writeJSON(w, map[string]string{"error": "persist probe_source: " + err.Error()})
-			return
-		}
-	}
-	if hasCarrier {
-		if err := config.UpdateYAMLField(s.cfgPath, "carrier", newCarrier, true); err != nil {
-			writeJSON(w, map[string]string{"error": "persist carrier: " + err.Error()})
-			return
-		}
-	}
-	if hasPingMode {
-		if newPingMode != "icmp" && newPingMode != "tcp" {
-			writeJSON(w, map[string]string{"error": "ping_mode must be icmp or tcp"})
-			return
-		}
-		if err := config.UpdateYAMLField(s.cfgPath, "ping_mode", newPingMode, true); err != nil {
-			writeJSON(w, map[string]string{"error": "persist ping_mode: " + err.Error()})
-			return
-		}
-	}
-	if hasPingPort {
-		if err := config.UpdateYAMLField(s.cfgPath, "ping_port", fmt.Sprintf("%d", newPingPort), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist ping_port: " + err.Error()})
-			return
-		}
-	}
-	if hasCheckInterval {
-		if err := config.UpdateYAMLField(s.cfgPath, "check_interval", fmt.Sprintf("%d", newCheckInterval), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist check_interval: " + err.Error()})
-			return
-		}
-	}
-	if hasPingAttempts {
-		if err := config.UpdateYAMLField(s.cfgPath, "ping_attempts", fmt.Sprintf("%d", newPingAttempts), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist ping_attempts: " + err.Error()})
-			return
-		}
-	}
-	if hasLatencyWeight {
-		if err := config.UpdateYAMLField(s.cfgPath, "selection_latency_weight", fmt.Sprintf("%.2f", newLatencyWeight), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist selection_latency_weight: " + err.Error()})
-			return
-		}
-	}
-	if hasJitterWeight {
-		if err := config.UpdateYAMLField(s.cfgPath, "selection_jitter_weight", fmt.Sprintf("%.2f", newJitterWeight), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist selection_jitter_weight: " + err.Error()})
-			return
-		}
-	}
-	if hasLossWeight {
-		if err := config.UpdateYAMLField(s.cfgPath, "selection_loss_weight", fmt.Sprintf("%.2f", newLossWeight), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist selection_loss_weight: " + err.Error()})
-			return
-		}
-	}
-	if hasSwitchImprovement {
-		if err := config.UpdateYAMLField(s.cfgPath, "switch_improvement_percent", fmt.Sprintf("%.2f", newSwitchImprovement), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist switch_improvement_percent: " + err.Error()})
-			return
-		}
-	}
-	if hasSwitchStableSec {
-		if err := config.UpdateYAMLField(s.cfgPath, "switch_stable_seconds", fmt.Sprintf("%d", newSwitchStableSec), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist switch_stable_seconds: " + err.Error()})
-			return
-		}
-	}
-	if hasFailedOrphanTTLHours {
-		if err := config.UpdateYAMLField(s.cfgPath, "failed_orphan_ttl_hours", fmt.Sprintf("%d", newFailedOrphanTTLHours), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist failed_orphan_ttl_hours: " + err.Error()})
-			return
-		}
-	}
-	if hasFallbackBaselineIP {
-		if newFallbackBaselineIP != "" && net.ParseIP(newFallbackBaselineIP) == nil {
-			writeJSON(w, map[string]string{"error": "fallback_baseline_ip must be a valid IP"})
-			return
-		}
-		if err := config.UpdateYAMLField(s.cfgPath, "fallback_baseline_ip", newFallbackBaselineIP, true); err != nil {
-			writeJSON(w, map[string]string{"error": "persist fallback_baseline_ip: " + err.Error()})
-			return
-		}
-	}
-	if hasAlertWebhookURL {
-		if newAlertWebhookURL != "" {
-			if _, err := url.ParseRequestURI(newAlertWebhookURL); err != nil {
-				writeJSON(w, map[string]string{"error": "alert_webhook_url is invalid: " + err.Error()})
-				return
-			}
-		}
-		if err := config.UpdateYAMLField(s.cfgPath, "alert_webhook_url", newAlertWebhookURL, true); err != nil {
-			writeJSON(w, map[string]string{"error": "persist alert_webhook_url: " + err.Error()})
-			return
-		}
-	}
-	if hasTimePenaltyStartHour {
-		if newTimePenaltyStartHour < 0 || newTimePenaltyStartHour > 23 {
-			writeJSON(w, map[string]string{"error": "time_penalty_start_hour must be between 0 and 23"})
-			return
-		}
-		if err := config.UpdateYAMLField(s.cfgPath, "time_penalty_start_hour", fmt.Sprintf("%d", newTimePenaltyStartHour), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist time_penalty_start_hour: " + err.Error()})
-			return
-		}
-	}
-	if hasTimePenaltyEndHour {
-		if newTimePenaltyEndHour < 0 || newTimePenaltyEndHour > 24 {
-			writeJSON(w, map[string]string{"error": "time_penalty_end_hour must be between 0 and 24"})
-			return
-		}
-		if err := config.UpdateYAMLField(s.cfgPath, "time_penalty_end_hour", fmt.Sprintf("%d", newTimePenaltyEndHour), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist time_penalty_end_hour: " + err.Error()})
-			return
-		}
-	}
-	if hasTimePenaltyScore {
-		if newTimePenaltyScore < 0 {
-			writeJSON(w, map[string]string{"error": "time_penalty_score cannot be negative"})
-			return
-		}
-		if err := config.UpdateYAMLField(s.cfgPath, "time_penalty_score", fmt.Sprintf("%.2f", newTimePenaltyScore), false); err != nil {
-			writeJSON(w, map[string]string{"error": "persist time_penalty_score: " + err.Error()})
-			return
-		}
-	}
-	if hasTimePenaltyKeywords {
-		if err := config.UpdateYAMLField(s.cfgPath, "time_penalty_org_keywords", newTimePenaltyKeywords, true); err != nil {
-			writeJSON(w, map[string]string{"error": "persist time_penalty_org_keywords: " + err.Error()})
-			return
-		}
-	}
-	if hasCloudflareAPIToken || hasCloudflareZoneID || hasCloudflareRecordID || hasAgentToken || hasAgentControllerURL || hasAgentReportTTL || hasAgentPeers {
-		nextCfg, err := config.Load(s.cfgPath)
-		if err != nil {
-			writeJSON(w, map[string]string{"error": "reload config: " + err.Error()})
-			return
-		}
-		if hasCloudflareAPIToken || hasCloudflareZoneID || hasCloudflareRecordID {
-			nextCfg.Cloudflare = nextCloudflare
-		}
-		if hasAgentToken {
-			nextCfg.Agent.Token = newAgentToken
-		}
-		if hasAgentControllerURL {
-			nextCfg.Agent.ControllerURL = newAgentControllerURL
-		}
-		if hasAgentReportTTL {
-			nextCfg.Agent.ReportTTLSeconds = newAgentReportTTL
-		}
-		if hasAgentPeers {
-			nextCfg.Agents = nextAgentPeers
-		}
-		if err := config.Save(s.cfgPath, nextCfg); err != nil {
-			writeJSON(w, map[string]string{"error": "persist structured config: " + err.Error()})
-			return
-		}
-		if (hasCloudflareAPIToken || hasCloudflareZoneID || hasCloudflareRecordID) && s.onCloudflare != nil {
-			s.onCloudflare(nextCloudflare)
-		}
-	}
-
-	hasRuntimeConfigChange := newTarget != "" || newCustom != "" || newProbeSource != "" || hasCarrier || hasPingMode || hasPingPort || hasCheckInterval || hasPingAttempts || hasLatencyWeight || hasJitterWeight || hasLossWeight || hasSwitchImprovement || hasSwitchStableSec || hasFailedOrphanTTLHours || hasFallbackBaselineIP || hasAlertWebhookURL || hasTimePenaltyStartHour || hasTimePenaltyEndHour || hasTimePenaltyScore || hasTimePenaltyKeywords
-
-	// Notify main loop
-	if s.onConfig != nil && hasRuntimeConfigChange {
-		finalTarget := newTarget
-		if finalTarget == "" {
-			finalTarget = st.TargetDomain
-		}
-		finalCustom := newCustom
-		if finalCustom == "" {
-			finalCustom = st.CustomDomain
-		}
-		finalProbeSource := newProbeSource
-		if finalProbeSource == "" {
-			finalProbeSource = st.ProbeSource
-		}
-		finalCarrier := st.Carrier
-		if hasCarrier {
-			finalCarrier = newCarrier
-		}
-		finalPingMode := st.PingMode
-		if hasPingMode {
-			finalPingMode = newPingMode
-		}
-		finalPingPort := st.PingPort
-		if hasPingPort {
-			finalPingPort = newPingPort
-		}
-		finalCheckInterval := st.CheckIntervalSec
-		if hasCheckInterval {
-			finalCheckInterval = newCheckInterval
-		}
-		finalPingAttempts := st.PingAttempts
-		if hasPingAttempts {
-			finalPingAttempts = newPingAttempts
-		}
-		finalLatencyWeight := st.LatencyWeight
-		if hasLatencyWeight {
-			finalLatencyWeight = newLatencyWeight
-		}
-		finalJitterWeight := st.JitterWeight
-		if hasJitterWeight {
-			finalJitterWeight = newJitterWeight
-		}
-		finalLossWeight := st.LossWeight
-		if hasLossWeight {
-			finalLossWeight = newLossWeight
-		}
-		finalSwitchImprovement := st.SwitchImprovement
-		if hasSwitchImprovement {
-			finalSwitchImprovement = newSwitchImprovement
-		}
-		finalSwitchStableSec := st.SwitchStableSec
-		if hasSwitchStableSec {
-			finalSwitchStableSec = newSwitchStableSec
-		}
-		finalFailedOrphanTTLHours := currentTTLHours
-		if hasFailedOrphanTTLHours {
-			finalFailedOrphanTTLHours = newFailedOrphanTTLHours
-		}
-		finalFallbackBaselineIP := currentFallbackIP
-		if hasFallbackBaselineIP {
-			finalFallbackBaselineIP = newFallbackBaselineIP
-		}
-		finalAlertWebhookURL := currentWebhookURL
-		if hasAlertWebhookURL {
-			finalAlertWebhookURL = newAlertWebhookURL
-		}
-		finalTimePenaltyStartHour := currentTimePenaltyStartHour
-		if hasTimePenaltyStartHour {
-			finalTimePenaltyStartHour = newTimePenaltyStartHour
-		}
-		finalTimePenaltyEndHour := currentTimePenaltyEndHour
-		if hasTimePenaltyEndHour {
-			finalTimePenaltyEndHour = newTimePenaltyEndHour
-		}
-		finalTimePenaltyScore := currentTimePenaltyScore
-		if hasTimePenaltyScore {
-			finalTimePenaltyScore = newTimePenaltyScore
-		}
-		finalTimePenaltyKeywords := currentTimePenaltyKeywords
-		if hasTimePenaltyKeywords {
-			finalTimePenaltyKeywords = newTimePenaltyKeywords
-		}
-		s.onConfig(finalTarget, finalCustom, finalProbeSource, finalCarrier, finalPingMode, finalPingPort, finalCheckInterval, finalPingAttempts, finalSwitchStableSec, finalLatencyWeight, finalJitterWeight, finalLossWeight, finalSwitchImprovement, finalFailedOrphanTTLHours, finalFallbackBaselineIP, finalAlertWebhookURL, finalTimePenaltyStartHour, finalTimePenaltyEndHour, finalTimePenaltyScore, finalTimePenaltyKeywords)
-	}
-
-	if hasFailedOrphanTTLHours || hasFallbackBaselineIP || hasAlertWebhookURL {
-		nextTTLHours := currentTTLHours
-		if hasFailedOrphanTTLHours {
-			nextTTLHours = newFailedOrphanTTLHours
-		}
-		nextFallbackIP := currentFallbackIP
-		if hasFallbackBaselineIP {
-			nextFallbackIP = newFallbackBaselineIP
-		}
-		nextWebhookURL := currentWebhookURL
-		if hasAlertWebhookURL {
-			nextWebhookURL = newAlertWebhookURL
-		}
-		s.SetSafeguards(nextTTLHours, nextFallbackIP, nextWebhookURL)
-	}
-	if hasTimePenaltyStartHour || hasTimePenaltyEndHour || hasTimePenaltyScore || hasTimePenaltyKeywords {
-		nextTimePenaltyStartHour := currentTimePenaltyStartHour
-		if hasTimePenaltyStartHour {
-			nextTimePenaltyStartHour = newTimePenaltyStartHour
-		}
-		nextTimePenaltyEndHour := currentTimePenaltyEndHour
-		if hasTimePenaltyEndHour {
-			nextTimePenaltyEndHour = newTimePenaltyEndHour
-		}
-		nextTimePenaltyScore := currentTimePenaltyScore
-		if hasTimePenaltyScore {
-			nextTimePenaltyScore = newTimePenaltyScore
-		}
-		nextTimePenaltyKeywords := currentTimePenaltyKeywords
-		if hasTimePenaltyKeywords {
-			nextTimePenaltyKeywords = newTimePenaltyKeywords
-		}
-		s.SetTimePenaltyConfig(nextTimePenaltyStartHour, nextTimePenaltyEndHour, nextTimePenaltyScore, nextTimePenaltyKeywords)
-	}
-
-	// Update in-memory status
-	if newTarget != "" {
-		st.TargetDomain = newTarget
-	}
-	if newCustom != "" {
-		st.CustomDomain = newCustom
-	}
-	if newProbeSource != "" {
-		st.ProbeSource = newProbeSource
-	}
-	if hasCarrier {
-		st.Carrier = newCarrier
-	}
-	if hasCarrier || newProbeSource != "" {
-		if config.NormalizeCarrier(st.Carrier) == "auto" {
-			st.CarrierLabel = config.CarrierLabel(config.InferCarrier(st.ProbeSource)) + "（自动）"
-		} else {
-			st.CarrierLabel = config.CarrierLabel(st.Carrier)
-		}
-	}
-	if hasPingMode {
-		st.PingMode = newPingMode
-	}
-	if hasPingPort {
-		st.PingPort = newPingPort
-	}
-	if hasCheckInterval {
-		st.CheckIntervalSec = newCheckInterval
-	}
-	if hasPingAttempts {
-		st.PingAttempts = newPingAttempts
-	}
-	if hasLatencyWeight {
-		st.LatencyWeight = newLatencyWeight
-	}
-	if hasJitterWeight {
-		st.JitterWeight = newJitterWeight
-	}
-	if hasLossWeight {
-		st.LossWeight = newLossWeight
-	}
-	if hasSwitchImprovement {
-		st.SwitchImprovement = newSwitchImprovement
-	}
-	if hasSwitchStableSec {
-		st.SwitchStableSec = newSwitchStableSec
-	}
-	if hasAgentToken || hasAgentReportTTL || hasAgentPeers {
-		st.Agents = s.AgentStatuses(0)
-	}
-	s.UpdateStatus(st)
-
-	if hasRuntimeConfigChange {
-		log.Printf("[config] updated: target_domain=%q custom_domain=%q probe_source=%q carrier=%q ping_mode=%q ping_port=%d check_interval=%d ping_attempts=%d latency_weight=%.2f jitter_weight=%.2f loss_weight=%.2f switch_improvement=%.2f switch_stable_seconds=%d failed_orphan_ttl_hours=%d fallback_baseline_ip=%q alert_webhook_url_set=%t time_penalty=%02d-%02d/+%.2f keywords=%q",
-			newTarget, newCustom, newProbeSource, newCarrier, newPingMode, newPingPort, newCheckInterval, newPingAttempts, newLatencyWeight, newJitterWeight, newLossWeight, newSwitchImprovement, newSwitchStableSec, newFailedOrphanTTLHours, newFallbackBaselineIP, newAlertWebhookURL != "", newTimePenaltyStartHour, newTimePenaltyEndHour, newTimePenaltyScore, newTimePenaltyKeywords)
-	}
-	if hasAgentToken || hasAgentReportTTL || hasAgentPeers {
-		agentTTL := cfgForCloudflare.Agent.ReportTTLSeconds
-		if hasAgentReportTTL {
-			agentTTL = newAgentReportTTL
-		}
-		agentCount := len(cfgForCloudflare.Agents)
-		if hasAgentPeers {
-			agentCount = len(nextAgentPeers)
-		}
-		log.Printf("[config] agent settings updated: token_set=%t report_ttl_seconds=%d agents=%d", strings.TrimSpace(cfgForCloudflare.Agent.Token) != "" || hasAgentToken, agentTTL, agentCount)
-	}
-	writeJSON(w, map[string]bool{"ok": true})
-}
-
 func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2619,7 +1812,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	// Send initial status
-	st := s.status.Load().(*Status)
+	st := s.GetStatus()
 	fmt.Fprintf(w, "event: status\ndata: %s\n\n", mustJSON(st))
 
 	// Send initial history

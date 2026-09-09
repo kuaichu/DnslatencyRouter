@@ -174,6 +174,28 @@ func (s *runtimeStore) replaceLogs(logs []LogEntry) error {
 	return tx.Commit()
 }
 
+// appendLog persists one newly emitted log line without rewriting the log
+// table. Retention and the hard row cap are applied in the same transaction.
+func (s *runtimeStore) appendLog(entry LogEntry) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO runtime_logs(time, line) VALUES(?, ?)`, timeText(entry.Time), entry.Line); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM runtime_logs WHERE time < ?`, timeText(time.Now().Add(-retentionWindow))); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM runtime_logs WHERE id NOT IN (
+		SELECT id FROM runtime_logs ORDER BY id DESC LIMIT ?
+	)`, maxLogEntries); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *runtimeStore) loadLogs(limit int) ([]LogEntry, error) {
 	rows, err := s.db.Query(`SELECT time, line FROM (
 		SELECT id, time, line FROM runtime_logs ORDER BY id DESC LIMIT ?
@@ -330,7 +352,7 @@ func (s *runtimeStore) upsertAgentReport(report agent.Report) error {
 	}
 	_, err = s.db.Exec(`INSERT INTO agent_reports(agent_id, finished_at, report_json) VALUES(?, ?, ?)
 		ON CONFLICT(agent_id) DO UPDATE SET finished_at = excluded.finished_at, report_json = excluded.report_json`,
-		report.AgentID, timeText(report.FinishedAt), string(data))
+		report.AgentID, timeText(report.FreshnessTime()), string(data))
 	return err
 }
 
@@ -338,8 +360,11 @@ func (s *runtimeStore) loadAgentReports(ttl time.Duration) ([]agent.Report, erro
 	query := `SELECT report_json FROM agent_reports`
 	args := []interface{}{}
 	if ttl > 0 {
-		query += ` WHERE finished_at >= ?`
-		args = append(args, timeText(time.Now().Add(-ttl)))
+		query += ` WHERE finished_at >= ? AND finished_at <= ?`
+		args = append(args, timeText(time.Now().Add(-ttl)), timeText(time.Now()))
+	} else {
+		query += ` WHERE finished_at <= ?`
+		args = append(args, timeText(time.Now()))
 	}
 	query += ` ORDER BY finished_at DESC`
 	rows, err := s.db.Query(query, args...)

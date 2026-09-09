@@ -13,6 +13,7 @@ dist/
 
 # Logs
 logs/
+.playwright-cli/
 
 # IDE
 .vscode/

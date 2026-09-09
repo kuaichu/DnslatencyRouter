@@ -534,6 +534,7 @@ func runAirportProfiles(cfg *config.Config, ws *web.Server, sc *switchController
 	outcome := &cycleOutcome{}
 	for _, profile := range cfg.AirportProfiles {
 		profileStatus := runAirportProfileOnce(cfg, profile, ws, sc)
+		sc.resetUnobservedRoutes(profile.ID, profileStatus.Regions)
 		outcome.Profiles = append(outcome.Profiles, profileStatus)
 		if outcome.ActiveIP == "" {
 			for _, region := range profileStatus.Regions {
@@ -555,6 +556,7 @@ func runAirportProfilesFromAgents(cfg *config.Config, ws *web.Server, sc *switch
 		profileStatus.Regions = make([]web.RegionStatus, 0)
 		profileStatus.DiscoveredCount = 0
 		profileStatus.Regions = append(profileStatus.Regions, runAgentRegionRecordDecisions(cfg, profile, ws, sc, now)...)
+		sc.resetUnobservedRoutes(profile.ID, profileStatus.Regions)
 		for _, region := range profileStatus.Regions {
 			profileStatus.DiscoveredCount += region.CandidateCount
 			if outcome.ActiveIP == "" && region.CurrentIP != "" {
@@ -596,6 +598,7 @@ func runAirportProfileOnce(cfg *config.Config, profile config.AirportProfile, ws
 	ips, err := resolveProfileIPs(profile, dnsServers)
 	if err != nil {
 		log.Printf("[error] [%s] dns resolve failed: %v", profile.ID, err)
+		sc.resetProfileCandidates(profile.ID)
 		return baseProfileStatus(profile)
 	}
 	log.Printf("[check] [%s] discovered %d merged unique IP(s): %v", profile.ID, len(ips), ips)
@@ -748,7 +751,7 @@ func runCarrierRecordDecisions(cfg *config.Config, profile config.AirportProfile
 				continue
 			}
 			prev, ok := latestByCarrier[carrier]
-			if !ok || report.FinishedAt.After(prev.FinishedAt) {
+			if !ok || report.FreshnessTime().After(prev.FreshnessTime()) {
 				latestByCarrier[carrier] = report
 			}
 		}
@@ -795,11 +798,14 @@ func runAgentRegionRecordDecisions(cfg *config.Config, profile config.AirportPro
 			continue
 		}
 		prev, ok := latestByCarrier[carrier]
-		if !ok || report.FinishedAt.After(prev.FinishedAt) {
+		if !ok || report.FreshnessTime().After(prev.FreshnessTime()) {
 			latestByCarrier[carrier] = report
 		}
 	}
 	if len(latestByCarrier) == 0 {
+		if !cfg.RunsLocalProbes() {
+			sc.resetProfileCandidates(profile.ID)
+		}
 		return nil
 	}
 
@@ -1181,6 +1187,7 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 	ips, err := checker.ResolveFromAllDNS(cfg.TargetDomain, dnsServers)
 	if err != nil {
 		log.Printf("[error] dns resolve failed: %v", err)
+		sc.reset()
 		return nil
 	}
 	log.Printf("[check] discovered %d unique IP(s): %v", len(ips), ips)
@@ -1422,82 +1429,14 @@ func main() {
 	triggerCh := make(chan struct{}, 1)
 	sc := &switchController{}
 	var cf *cloudflare.Client
+	configChanges := make(chan *config.Config, 1)
 
 	// Start web dashboard if configured
 	var ws *web.Server
 	if cfg.WebPort > 0 {
-		// Clone cfg pointer for the callback closure
-		cfgPtr := cfg
-		ws = web.New(cfg.WebPort, configPath, triggerCh, func(targetDomain, customDomain, probeSource, carrier, pingMode string, pingPort, checkInterval, pingAttempts, switchStableSec int, latencyWeight, jitterWeight, lossWeight, switchImprovement float64, failedOrphanTTLHours int, fallbackBaselineIP, alertWebhookURL string, timePenaltyStartHour, timePenaltyEndHour int, timePenaltyScore float64, timePenaltyOrgKeywords string) {
-			cfgPtr.TargetDomain = targetDomain
-			cfgPtr.CustomDomain = customDomain
-			cfgPtr.ProbeSource = probeSource
-			cfgPtr.Carrier = config.NormalizeCarrier(carrier)
-			if pingMode != "" {
-				cfgPtr.PingMode = pingMode
-			}
-			if pingPort > 0 {
-				cfgPtr.PingPort = pingPort
-			}
-			if checkInterval > 0 {
-				cfgPtr.CheckIntervalSec = checkInterval
-				cfgPtr.CheckInterval = time.Duration(checkInterval) * time.Second
-			}
-			if pingAttempts > 0 {
-				cfgPtr.PingAttempts = pingAttempts
-			}
-			if latencyWeight > 0 {
-				cfgPtr.LatencyWeight = latencyWeight
-			}
-			if jitterWeight >= 0 {
-				cfgPtr.JitterWeight = jitterWeight
-			}
-			if lossWeight >= 0 {
-				cfgPtr.LossWeight = lossWeight
-			}
-			if switchImprovement >= 0 {
-				cfgPtr.SwitchImprovement = switchImprovement
-			}
-			if switchStableSec >= 0 {
-				cfgPtr.SwitchStableSec = switchStableSec
-			}
-			if failedOrphanTTLHours >= 0 {
-				cfgPtr.FailedOrphanTTLHours = failedOrphanTTLHours
-				cfgPtr.FailedOrphanTTL = time.Duration(failedOrphanTTLHours) * time.Hour
-			}
-			cfgPtr.FallbackBaselineIP = fallbackBaselineIP
-			cfgPtr.AlertWebhookURL = alertWebhookURL
-			if timePenaltyStartHour >= 0 {
-				cfgPtr.TimePenaltyStartHour = timePenaltyStartHour
-			}
-			if timePenaltyEndHour >= 0 {
-				cfgPtr.TimePenaltyEndHour = timePenaltyEndHour
-			}
-			if timePenaltyScore >= 0 {
-				cfgPtr.TimePenaltyScore = timePenaltyScore
-			}
-			cfgPtr.TimePenaltyOrgKeywords = timePenaltyOrgKeywords
-			ws.SetSafeguards(cfgPtr.FailedOrphanTTLHours, cfgPtr.FallbackBaselineIP, cfgPtr.AlertWebhookURL)
-			ws.SetTimePenaltyConfig(cfgPtr.TimePenaltyStartHour, cfgPtr.TimePenaltyEndHour, cfgPtr.TimePenaltyScore, cfgPtr.TimePenaltyOrgKeywords)
-			log.Printf("[config] applied: target_domain=%q custom_domain=%q probe_source=%q carrier=%q effective_carrier=%q ping_mode=%q ping_port=%d check_interval=%d ping_attempts=%d latency_weight=%.2f jitter_weight=%.2f loss_weight=%.2f switch_improvement=%.2f switch_stable_seconds=%d failed_orphan_ttl_hours=%d fallback_baseline_ip=%q alert_webhook_url_set=%t time_penalty=%02d-%02d/+%.2f keywords=%q",
-				targetDomain, customDomain, probeSource, cfgPtr.Carrier, cfgPtr.EffectiveCarrierLabel(), pingMode, pingPort, checkInterval, pingAttempts, latencyWeight, jitterWeight, lossWeight, switchImprovement, switchStableSec, cfgPtr.FailedOrphanTTLHours, cfgPtr.FallbackBaselineIP, cfgPtr.AlertWebhookURL != "", cfgPtr.TimePenaltyStartHour, cfgPtr.TimePenaltyEndHour, cfgPtr.TimePenaltyScore, cfgPtr.TimePenaltyOrgKeywords)
-		})
-		ws.SetProfilesCallback(func(next *config.Config) {
-			cfgPtr.BaseDomain = next.BaseDomain
-			cfgPtr.AirportProfiles = next.AirportProfiles
-			cfgPtr.TargetDomain = next.TargetDomain
-			cfgPtr.CustomDomain = next.CustomDomain
-			cfgPtr.ProbeSource = next.ProbeSource
-			cfgPtr.Carrier = next.Carrier
-			log.Printf("[config] airport profiles applied: base_domain=%q profiles=%d", cfgPtr.BaseDomain, len(cfgPtr.AirportProfiles))
-		})
-		ws.SetCloudflareCallback(func(next config.CloudflareConfig) {
-			cfgPtr.Cloudflare = next
-			if !cfgPtr.HasAirportProfiles() {
-				cf = cloudflare.New(cfgPtr.Cloudflare.APIToken, cfgPtr.Cloudflare.ZoneID, cfgPtr.Cloudflare.RecordID, cfgPtr.ProxyURL)
-			}
-			log.Printf("[config] cloudflare credentials updated: token_set=%t zone_id_set=%t record_id_set=%t",
-				strings.TrimSpace(cfgPtr.Cloudflare.APIToken) != "", strings.TrimSpace(cfgPtr.Cloudflare.ZoneID) != "", strings.TrimSpace(cfgPtr.Cloudflare.RecordID) != "")
+		ws = web.New(cfg.WebPort, configPath, triggerCh)
+		ws.SetConfigCallback(func(next *config.Config) {
+			queueConfigUpdate(configChanges, next)
 		})
 		ws.SetSafeguards(cfg.FailedOrphanTTLHours, cfg.FallbackBaselineIP, cfg.AlertWebhookURL)
 		ws.SetTimePenaltyConfig(cfg.TimePenaltyStartHour, cfg.TimePenaltyEndHour, cfg.TimePenaltyScore, cfg.TimePenaltyOrgKeywords)
@@ -1610,6 +1549,23 @@ func main() {
 
 	for {
 		select {
+		case next := <-configChanges:
+			// Only the main goroutine owns cfg, cf and switch state.
+			cfg = next
+			sc = &switchController{}
+			cf = nil
+			if !cfg.HasAirportProfiles() {
+				cf = cloudflare.New(cfg.Cloudflare.APIToken, cfg.Cloudflare.ZoneID, cfg.Cloudflare.RecordID, cfg.ProxyURL)
+			}
+			now := time.Now()
+			nextCheck = now.Add(cfg.CheckInterval)
+			if ws != nil {
+				st := ws.GetStatus()
+				applyRuntimeConfigStatus(st, cfg, &nextCheck, now)
+				ws.UpdateStatus(st)
+			}
+			timer.Reset(cfg.CheckInterval)
+			log.Printf("[config] applied complete configuration between probe cycles")
 		case <-timer.C:
 			runCheckCycle(cfg, cf, ws, &nextCheck, sc)
 			timer.Reset(cfg.CheckInterval)

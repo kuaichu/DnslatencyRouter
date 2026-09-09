@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -263,7 +264,42 @@ func Save(path string, cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	return atomicWriteFile(path, data, 0644)
+}
+
+// atomicWriteFile replaces path only after the complete new contents have
+// been written and closed. The temporary file is created beside the target so
+// Rename remains a single-filesystem operation.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary config: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod temporary config: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temporary config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync temporary config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary config: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("replace config: %w", err)
+	}
+	return nil
 }
 
 func normalizeSlug(value string) string {
@@ -760,42 +796,52 @@ func (c *Config) EffectiveDNSServersFor(carrier, probeSource string) []string {
 	}
 }
 
-// UpdateYAMLField updates a specific field in the YAML config file,
-// preserving comments and formatting (line-based replacement).
-// If quoted is true, the value is wrapped in double quotes (for string fields).
+// UpdateYAMLField updates a root-level field in the YAML config file. It uses
+// yaml.Node so values are escaped according to YAML rules and a nested field
+// with the same name can never be accidentally changed. If quoted is true,
+// the value is emitted as a double-quoted YAML string.
 func UpdateYAMLField(path, key, value string, quoted bool) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read config for update: %w", err)
 	}
-
-	lines := strings.Split(string(data), "\n")
-	prefix := key + ":"
-	replaced := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, prefix) {
-			indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-			if quoted {
-				lines[i] = indent + key + ": \"" + value + "\""
-			} else {
-				lines[i] = indent + key + ": " + value
-			}
-			replaced = true
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("parse config for update: %w", err)
+	}
+	if len(doc.Content) == 0 {
+		doc.Content = []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return fmt.Errorf("config root must be a mapping")
+	}
+	newValue := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+	if quoted {
+		newValue.Style = yaml.DoubleQuotedStyle
+	} else {
+		// Keep the caller's scalar syntax (numbers, booleans, etc.) valid while
+		// avoiding string interpolation into YAML source.
+		var parsed yaml.Node
+		if err := yaml.Unmarshal([]byte(value), &parsed); err == nil && len(parsed.Content) == 1 && parsed.Content[0].Kind == yaml.ScalarNode {
+			newValue = parsed.Content[0]
+		}
+	}
+	found := false
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			root.Content[i+1] = newValue
+			found = true
 			break
 		}
 	}
-
-	if !replaced {
-		newLine := key + ": " + value
-		if quoted {
-			newLine = key + ": \"" + value + "\""
-		}
-		if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
-			lines = append(lines, "")
-		}
-		lines = append(lines, newLine)
+	if !found {
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, newValue)
 	}
-
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return fmt.Errorf("marshal config update: %w", err)
+	}
+	return atomicWriteFile(path, out, 0644)
 }
