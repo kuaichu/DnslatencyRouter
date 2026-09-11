@@ -52,8 +52,16 @@ body:before{
   -webkit-mask-image:radial-gradient(circle at 50% 35%,black 45%,transparent 85%);
 }
 button,input,select{font:inherit}button{border:0;color:inherit}
-.shell{position:relative;z-index:1;width:min(1220px,calc(100vw - 44px));margin:0 auto;padding:26px 0 44px}
-.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:26px;flex-wrap:wrap}
+.shell{position:relative;z-index:1;width:min(1220px,calc(100vw - 44px));margin:0 auto;padding:22px 0 44px}
+.topbar-wrap{
+  position:sticky;top:0;z-index:85;width:100%;
+  background:rgba(4,11,18,.86);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border-bottom:1px solid rgba(132,162,184,.14);box-shadow:0 10px 32px rgba(0,0,0,.42);
+}
+.topbar{
+  width:min(1220px,calc(100vw - 44px));margin:0 auto;padding:12px 0;
+  display:flex;align-items:center;justify-content:space-between;gap:16px;
+}
 .brand{display:flex;align-items:center;gap:14px}
 .brand-mark{
   width:42px;height:42px;border-radius:13px;display:grid;place-items:center;color:#04120e;
@@ -65,19 +73,19 @@ button,input,select{font:inherit}button{border:0;color:inherit}
 h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--text-bright)}
 
 .top-center{display:flex;align-items:center;gap:6px}
-.nav-switch{
-  display:inline-flex;align-items:center;padding:3px;border-radius:999px;
-  border:1px solid rgba(132,162,184,.14);background:rgba(8,18,28,.62);
+.nav-anchors{
+  display:inline-flex;align-items:center;gap:3px;padding:3px;border-radius:999px;
+  border:1px solid rgba(132,162,184,.14);background:rgba(8,18,28,.65);
   backdrop-filter:blur(14px);
 }
-.nav-switch-btn{
-  min-height:30px;padding:0 14px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;
+.anchor-link{
+  min-height:30px;padding:0 12px;border-radius:999px;display:inline-flex;align-items:center;gap:5px;
   font-size:12px;font-weight:750;color:#94a3b8;text-decoration:none;cursor:pointer;
-  transition:all .18s ease;
+  transition:all .18s ease;border:1px solid transparent;
 }
-.nav-switch-btn:hover{color:#e2e8f0;background:rgba(255,255,255,.05)}
-.nav-switch-btn.active{
-  background:rgba(32,214,162,.15);color:#9ff5d1;border:1px solid rgba(32,214,162,.3);
+.anchor-link:hover{color:#e2e8f0;background:rgba(255,255,255,.05)}
+.anchor-link.active{
+  background:rgba(32,214,162,.15);color:#9ff5d1;border-color:rgba(32,214,162,.3);
   box-shadow:0 2px 8px rgba(16,185,129,.16);
 }
 
@@ -260,11 +268,62 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
 .mini-card .value,.stat-card .value{font-family:var(--mono);font-size:22px;font-weight:900;color:#ffffff;overflow-wrap:anywhere;line-height:1.15}
 .mini-card .hint,.stat-card .hint{color:var(--faint);font-size:12px;margin-top:6px;font-weight:600}
 
-.side-panel{padding:22px;display:flex;flex-direction:column;gap:12px}
-.side-title,.section-title{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
-.side-title h2,.section-title h2{margin:0;font-size:16px;font-weight:850;letter-spacing:-.01em;color:#ffffff}
-.mode-badge{padding:4px 10px;border-radius:999px;color:#041510;font-size:11px;font-weight:850;background:var(--green-bright);box-shadow:0 2px 10px rgba(32,214,162,.3)}
+.side-panel{
+  padding:22px 24px;display:flex;flex-direction:column;gap:13px;
+  background:radial-gradient(circle at 92% 14%,rgba(56,189,248,.1),transparent 16rem),var(--panel);
+}
+.side-title{display:flex;align-items:center;justify-content:space-between;gap:14px}
+.side-title-text{display:flex;flex-direction:column;gap:3px}
+.side-eyebrow{font-size:10px;font-weight:800;color:var(--muted);letter-spacing:.12em;text-transform:uppercase}
+.side-title h2{margin:0;font-size:16px;font-weight:850;letter-spacing:-.01em;color:#ffffff}
+.mode-badge{
+  padding:4px 11px;border-radius:999px;color:#041510;font-size:11px;font-weight:900;
+  background:linear-gradient(135deg,#20d6a2,#34d399);box-shadow:0 2px 10px rgba(32,214,162,.35);
+  letter-spacing:.03em;
+}
 
+.decision-target-box{
+  border:1px solid rgba(132,162,184,.14);border-radius:16px;padding:12px 14px;
+  background:linear-gradient(160deg,rgba(255,255,255,.045),rgba(255,255,255,.015));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);display:flex;flex-direction:column;gap:6px;
+  transition:border-color .18s ease;
+}
+.decision-target-box:hover{border-color:rgba(32,214,162,.32)}
+.decision-target-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.decision-label{font-size:11px;font-weight:750;color:#78909c}
+.decision-slug-pill{
+  font-family:var(--mono);font-size:11px;font-weight:800;padding:2px 8px;border-radius:6px;
+  background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.25);color:#7dd3fc;
+}
+.decision-target-val{
+  font-family:var(--mono);font-size:13.5px;font-weight:800;color:#f1f7fb;line-height:1.35;
+  overflow-wrap:anywhere;word-break:break-all;
+}
+
+.decision-params-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.decision-param-chip{
+  border:1px solid rgba(132,162,184,.12);border-radius:14px;padding:9px 12px;
+  background:rgba(255,255,255,.025);display:flex;align-items:center;justify-content:space-between;gap:8px;
+}
+.decision-param-chip .param-label{font-size:11.5px;font-weight:700;color:#78909c}
+.decision-param-chip .param-val{font-family:var(--mono);font-size:12.5px;font-weight:800;color:#e2e8f0}
+
+.runtime-extra{
+  display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;
+  margin-top:2px;border-top:0;
+}
+.runtime-extra .kpi-card{
+  border:1px solid rgba(132,162,184,.12);border-radius:14px;padding:10px 8px;
+  background:linear-gradient(160deg,rgba(255,255,255,.035),rgba(255,255,255,.01));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.03);text-align:center;
+  display:flex;flex-direction:column;gap:5px;justify-content:center;
+}
+.runtime-extra .kpi-label{font-size:11px;font-weight:700;color:#78909c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.runtime-extra .kpi-val{font-family:var(--mono);font-size:15.5px;font-weight:900;color:#ffffff;line-height:1.2}
+.runtime-extra .kpi-val.highlight-cyan{color:#38bdf8}
+.runtime-extra .kpi-val.highlight-amber{color:#fbbf24}
+
+.section,.hero,.logs{scroll-margin-top:84px}
 .section{padding:24px}
 .section-title{margin-bottom:16px}
 .section-title p{margin:5px 0 0;color:var(--muted);font-size:13px}
@@ -514,7 +573,7 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
 }
 .ip-status-tag.timeout{background:rgba(251,191,36,.16);color:#fbbf24}
 .ip-sample-count{color:#64748b;font-size:11px;font-weight:700;line-height:1.2;white-space:nowrap}
-.ip-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.ip-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .ip-meta-item{border-top:1px solid rgba(132,162,184,.1);padding-top:8px}
 .ip-meta-label{color:var(--faint);font-size:11px;font-weight:600;margin-bottom:3px}
 .ip-meta-value{font-family:var(--mono);font-size:15px;font-weight:800;color:#e2e8f0}
@@ -675,8 +734,15 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
 }
 @media(max-width:680px){
   .shell{width:min(100% - 24px,1220px);padding-top:16px}
-  .topbar{align-items:flex-start;flex-direction:column;gap:14px}
-  .top-actions{justify-content:flex-start;width:100%}
+  .topbar{padding:10px 0;gap:10px;flex-wrap:wrap}
+  .brand{gap:10px}
+  .brand-mark{width:34px;height:34px}
+  .eyebrow{display:none}
+  h1{font-size:16px}
+  .top-center{width:100%;order:3;overflow-x:auto;padding-bottom:2px}
+  .nav-anchors{width:max-content}
+  .top-actions{justify-content:flex-end;order:2;gap:6px}
+  .pill,.btn{min-height:34px;padding:0 12px;font-size:12px}
   .hero-main,.section,.side-panel{padding:18px;border-radius:20px}
   .metric-strip{grid-template-columns:1fr}
   .agent-grid,.region-grid{grid-template-columns:1fr}
@@ -689,6 +755,7 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
   .chart-toolbar{align-items:flex-start;flex-direction:column}
   .chart-groups{min-width:100%}
   .ip-stats-grid{grid-template-columns:1fr}
+  .ip-meta{grid-template-columns:repeat(2,minmax(0,1fr))}
   .log-head{flex-direction:column}
   .log-toolbar{width:100%}
   .log-cycle-summary{align-items:flex-start;flex-direction:column}
@@ -706,9 +773,6 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
 /* Agent task detail: shares the dashboard palette and native dialog focus handling. */
 .agent-detail-action{display:flex;justify-content:flex-end;margin-top:12px}
 .agent-detail-action button:focus-visible,.agent-task-dialog button:focus-visible{outline:2px solid #38bdf8;outline-offset:3px}
-.runtime-extra{display:grid;gap:0;margin-top:4px;border-top:1px solid var(--line)}
-.runtime-extra div{display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid var(--line);font-size:12px;color:#94a3b8}
-.runtime-extra strong{color:#e2e8f0;font-family:var(--mono);text-align:right}
 .agent-task-dialog{position:fixed;inset:0 0 0 auto;margin:0;width:min(480px,100vw);max-width:100vw;height:100dvh;max-height:100dvh;padding:0;border:0;border-left:1px solid var(--line);background:#0b1522;color:#e2e8f0;box-shadow:-20px 0 70px rgba(0,0,0,.35);overflow:auto}
 .agent-task-dialog::backdrop{background:rgba(2,6,12,.65);backdrop-filter:blur(4px)}
 .agent-task-shell{min-height:100%;padding:28px;box-sizing:border-box}
@@ -730,8 +794,8 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
 </style>
 </head>
 <body>
-<div class="shell">
-  <header class="topbar">
+<header class="topbar-wrap">
+  <div class="topbar">
     <div class="brand">
       <div class="brand-mark" aria-hidden="true">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -746,8 +810,13 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
       </div>
     </div>
     <div class="top-center">
-      <nav class="nav-switch" aria-label="视图模式">
-        <span class="nav-switch-btn active">监控大屏</span>
+      <nav class="nav-anchors" aria-label="快捷导航">
+        <a href="#heroSection" class="anchor-link active">核心路由</a>
+        <a href="#agentSection" class="anchor-link">探针态势</a>
+        <a href="#regionSection" class="anchor-link">地区解析</a>
+        <a href="#chartSection" class="anchor-link">走势分析</a>
+        <a href="#ipSection" class="anchor-link">IP表现</a>
+        <a href="#logsSection" class="anchor-link">实时日志</a>
       </nav>
     </div>
     <div class="top-actions">
@@ -761,14 +830,12 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
         <span>管理设置</span>
       </button>
     </div>
-  </header>
+  </div>
+</header>
+<div class="shell">
   <nav class="profile-rail" id="profileRail" aria-label="机场切换"></nav>
   <main>
-    <section class="panel section agent-section" id="agentSection">
-      <div class="section-title"><div><h2>Agent 探针</h2><p>点击子机后，下方地区解析、延迟历史和 IP 表现会切换到该节点视角。</p></div><span class="sub-chip shrink-0 whitespace-nowrap" id="agentCount">0 在线</span></div>
-      <div class="agent-grid" id="agentGrid"></div>
-    </section>
-    <section class="hero">
+    <section class="hero" id="heroSection">
       <div class="panel hero-main">
         <div class="hero-stack">
           <div class="hero-grid">
@@ -797,34 +864,115 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
           </div>
         </div>
       </div>
-      <aside class="panel side-panel">
-        <div class="side-title"><h2>运行参数</h2><span class="mode-badge" id="pingModeBadge">ICMP</span></div>
-        <div class="stat-card"><div class="label">机场缩写</div><div class="value" id="profileSlugSide">-</div><div class="hint" id="profileSlugHint">用于生成 运营商-机场-地区 子域名</div></div>
-        <div class="stat-card"><div class="label">自定义域名</div><div class="value" id="customDomainSide">-</div><div class="hint">检测结果会更新到此记录</div></div>
-        <div class="stat-card"><div class="label">Ping 方式</div><div class="value" id="pingMode">-</div><div class="hint" id="pingModeHint">ICMP 测主机延迟，TCP 测端口连通性</div></div>
-        <div class="stat-card"><div class="label">检测周期</div><div class="value" id="intervalSide">-</div><div class="hint">可在管理设置中调整</div></div>
-        <div class="runtime-extra" aria-label="选路参数摘要">
-          <div><span>单 IP 探测次数</span><strong id="attemptsSide">-</strong></div>
-          <div><span>切换改进阈值</span><strong id="improvementSide">-</strong></div>
-          <div><span>候选稳定时间</span><strong id="stableSide">-</strong></div>
+      <aside class="panel side-panel" id="decisionPanel">
+        <div class="side-title">
+          <div class="side-title-text">
+            <span class="side-eyebrow">ROUTING DECISION</span>
+            <h2>选路决策与运行态势</h2>
+          </div>
+          <span class="mode-badge" id="pingModeBadge">ICMP</span>
         </div>
+
+        <div class="decision-target-box">
+          <div class="decision-target-head">
+            <span class="decision-label">生效路由目标</span>
+            <span class="decision-slug-pill" id="profileSlugSide">-</span>
+          </div>
+          <div class="decision-target-val" id="customDomainSide" title="-">-</div>
+        </div>
+
+        <div class="decision-params-grid">
+          <div class="decision-param-chip">
+            <span class="param-label">检测方式</span>
+            <strong class="param-val" id="pingMode">-</strong>
+          </div>
+          <div class="decision-param-chip">
+            <span class="param-label">检测周期</span>
+            <strong class="param-val" id="intervalSide">-</strong>
+          </div>
+        </div>
+
+        <div class="runtime-extra" aria-label="选路参数摘要">
+          <div class="kpi-card">
+            <span class="kpi-label">单 IP 探测</span>
+            <strong class="kpi-val" id="attemptsSide">-</strong>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">切换改进阈值</span>
+            <strong class="kpi-val highlight-cyan" id="improvementSide">-</strong>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">候选稳定时间</span>
+            <strong class="kpi-val highlight-amber" id="stableSide">-</strong>
+          </div>
+        </div>
+        <span id="pingModeHint" style="display:none"></span>
+        <span id="profileSlugHint" style="display:none"></span>
       </aside>
     </section>
+
+    <section class="panel section agent-section" id="agentSection">
+      <div class="section-title"><div><h2>Agent 探针态势</h2><p>分布式探针网络心跳与探测视角切换；点击可切换下方地区解析、走势图与 IP 表现的视角。</p></div><span class="sub-chip shrink-0 whitespace-nowrap" id="agentCount">0 在线</span></div>
+      <div class="agent-grid" id="agentGrid"></div>
+    </section>
+
     <section class="panel section region-section" id="regionSection">
-      <div class="section-title"><div><h2>地区解析</h2><p>当前机场按 IP 归属地分组后，分别写入对应地区域名。</p></div><span class="sub-chip shrink-0 whitespace-nowrap" id="regionCount">0 个地区</span></div>
+      <div class="section-title"><div><h2>地区解析矩阵</h2><p>当前机场按 IP 归属地分组后，分别写入对应地区域名；高亮翡翠绿为当前命中的生效线路。</p></div><span class="sub-chip shrink-0 whitespace-nowrap" id="regionCount">0 个地区</span></div>
       <div class="region-hero" id="regionHero"></div>
       <div class="region-grid" id="regionCards"></div>
     </section>
-    <section class="panel section">
-      <div class="section-title"><div><h2>延迟历史</h2><p id="chartRangeHint">最近 1 天成功检测，悬停可查看具体 IP 与时间。</p></div><div class="chart-title-actions"><div class="chart-range" id="chartRange" aria-label="延迟历史范围"><button class="chart-range-btn active" type="button" data-days="1">1天</button><button class="chart-range-btn" type="button" data-days="7">7天</button><button class="chart-range-btn" type="button" data-days="30">30天</button></div><span class="sub-chip shrink-0 whitespace-nowrap" id="historyCount">0 条记录</span></div></div>
-      <div class="chart-toolbar"><div class="chart-ip-list" id="chartIpList"></div><div class="chart-focus" id="chartFocus">默认显示延迟最低的节点</div></div>
-      <div class="chart-wrap"><canvas id="latencyChart"></canvas><div class="empty-state" id="chartEmpty">暂无历史数据，点击「立即检测」跑第一轮。</div></div>
+
+    <section class="panel section" id="chartSection">
+      <div class="section-title">
+        <div><h2>历史延迟走势</h2><p id="chartRangeHint">最近 1 天成功检测，悬停可查看具体 IP 与时间。</p></div>
+        <div class="chart-title-actions">
+          <div class="chart-range" id="chartRange" aria-label="延迟历史范围">
+            <button class="chart-range-btn active" type="button" data-days="1">1天</button>
+            <button class="chart-range-btn" type="button" data-days="7">7天</button>
+            <button class="chart-range-btn" type="button" data-days="30">30天</button>
+          </div>
+          <span class="sub-chip shrink-0 whitespace-nowrap" id="historyCount">0 条记录</span>
+        </div>
+      </div>
+      <div class="chart-toolbar">
+        <div class="chart-ip-list" id="chartIpList"></div>
+        <div class="chart-focus" id="chartFocus">默认显示延迟最低的节点</div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="latencyChart"></canvas>
+        <div class="empty-state" id="chartEmpty">暂无历史数据，点击「立即检测」跑第一轮。</div>
+      </div>
     </section>
-    <section class="panel section ip-section" style="margin-top:20px">
-      <div class="section-title"><div><h2>IP 表现</h2><p>基于最近 30 天的解析与探测样本，观察每个 IP 在你本地网络下的延迟稳定性。</p></div><span class="sub-chip shrink-0 whitespace-nowrap" id="ipStatsCount">0 个 IP</span></div>
+
+    <section class="panel section ip-section" id="ipSection" style="margin-top:20px">
+      <div class="section-title">
+        <div><h2>候选 IP 表现矩阵</h2><p>基于最近 30 天的解析与探测样本，观察每个 IP 在本地网络下的延迟稳定性与综合评分。</p></div>
+        <span class="sub-chip shrink-0 whitespace-nowrap" id="ipStatsCount">0 个 IP</span>
+      </div>
       <div class="ip-stats-shell" id="ipStats"></div>
     </section>
-    <section class="panel logs"><div class="log-head"><div class="log-head-left"><strong>实时日志</strong><div class="log-toolbar"><div class="filter-tags" id="logFilters"><button class="filter-tag active" type="button" data-filter="all">全部</button><button class="filter-tag" type="button" data-filter="ping">检测</button><button class="filter-tag" type="button" data-filter="decision">决策</button><button class="filter-tag" type="button" data-filter="system">系统</button></div><span class="log-sub" id="logMeta">按检测周期分组显示，默认自动跟随最新日志</span></div></div><div style="display:flex;align-items:center;gap:12px"><button class="log-toggle active" id="logAutofollow" type="button">自动跟随</button><span class="log-count" id="logCount">0 条</span></div></div><div class="log-body" id="logBody"></div></section>
+
+    <section class="panel logs" id="logsSection">
+      <div class="log-head">
+        <div class="log-head-left">
+          <strong>实时日志</strong>
+          <div class="log-toolbar">
+            <div class="filter-tags" id="logFilters">
+              <button class="filter-tag active" type="button" data-filter="all">全部</button>
+              <button class="filter-tag" type="button" data-filter="ping">检测</button>
+              <button class="filter-tag" type="button" data-filter="decision">决策</button>
+              <button class="filter-tag" type="button" data-filter="system">系统</button>
+            </div>
+            <span class="log-sub" id="logMeta">按检测周期分组显示，默认自动跟随最新日志</span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="log-toggle active" id="logAutofollow" type="button">自动跟随</button>
+          <span class="log-count" id="logCount">0 条</span>
+        </div>
+      </div>
+      <div class="log-body" id="logBody"></div>
+    </section>
   </main>
 </div>
 <dialog class="agent-task-dialog" id="agentTaskDialog" aria-labelledby="agentTaskTitle" aria-describedby="agentTaskSubtitle">
@@ -889,8 +1037,8 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
       <div class="settings-panel" data-panel="probe">
         <div class="form-grid">
           <div class="field"><label for="inputCheckInterval">检测间隔（秒）</label><input type="number" id="inputCheckInterval" min="10" placeholder="300"><div class="hint">两次检测之间的等待时间，最小 10 秒。</div></div>
-          <div class="field"><label for="inputPingMode">Ping 方式</label><select id="inputPingMode"><option value="icmp">ICMP - 延迟最低，无需端口</option><option value="tcp">TCP - 检测端口连通性</option></select><div class="hint">ICMP 看主机响应，TCP 更贴近业务端口。</div></div>
-          <div class="field"><label for="inputPingPort">Ping 端口</label><input type="number" id="inputPingPort" min="1" max="65535" placeholder="443"><div class="hint">仅 TCP 模式使用，ICMP 模式会忽略。</div></div>
+          <div class="field"><label for="inputPingMode">Ping 方式</label><select id="inputPingMode"><option value="icmp">ICMP - 延迟最低</option><option value="tcp">TCP - 直接测服务端口</option></select><div class="hint">ICMP 模式也会先检查下面配置的服务端口是否可用。</div></div>
+          <div class="field"><label for="inputPingPort">服务端口</label><input type="number" id="inputPingPort" min="1" max="65535" placeholder="443"><div class="hint">每轮都会检查此端口；TCP 模式同时用它测量延迟。例如代理服务可填 12001。</div></div>
           <div class="field"><label for="inputPingAttempts">单轮探测次数</label><input type="number" id="inputPingAttempts" min="1" max="10" placeholder="4"><div class="hint">每个 IP 每轮探测多少次，用于计算抖动和丢包率。</div></div>
         </div>
       </div>
@@ -917,8 +1065,8 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
 <div class="toast" id="toast"></div>
 <script>
 const $=id=>document.getElementById(id);
-const els={logBody:$('logBody'),logCount:$('logCount'),statusBadge:$('statusBadge'),profileRail:$('profileRail'),agentSection:$('agentSection'),agentGrid:$('agentGrid'),agentCount:$('agentCount'),regionSection:$('regionSection'),regionHero:$('regionHero'),regionCards:$('regionCards'),regionCount:$('regionCount'),targetDomain:$('targetDomain'),targetSub:$('targetSub'),currentIP:$('currentIP'),currentIPHint:$('currentIPHint'),customDomain:$('customDomain'),customDomainSide:$('customDomainSide'),profileSlugSide:$('profileSlugSide'),profileSlugHint:$('profileSlugHint'),probeSourceDisplay:$('probeSourceDisplay'),latency:$('latency'),latencySub:$('latencySub'),nextCheck:$('nextCheck'),checkInterval:$('checkInterval'),discoveredCount:$('discoveredCount'),pingModeBadge:$('pingModeBadge'),pingMode:$('pingMode'),pingModeHint:$('pingModeHint'),intervalSide:$('intervalSide'),historyCount:$('historyCount'),chartRange:$('chartRange'),chartRangeHint:$('chartRangeHint'),chartIpList:$('chartIpList'),chartFocus:$('chartFocus'),ipStats:$('ipStats'),ipStatsCount:$('ipStatsCount'),canvas:$('latencyChart'),chartEmpty:$('chartEmpty'),checkNowBtn:$('checkNowBtn'),settingsBtn:$('settingsBtn'),settingsModal:$('settingsModal'),inputTarget:$('inputTarget'),inputCustom:$('inputCustom'),inputProbeSource:$('inputProbeSource'),inputCarrier:$('inputCarrier'),inputCloudflareToken:$('inputCloudflareToken'),inputCloudflareZoneID:$('inputCloudflareZoneID'),inputCloudflareRecordID:$('inputCloudflareRecordID'),cloudflareTokenHint:$('cloudflareTokenHint'),inputAgentToken:$('inputAgentToken'),inputAgentControllerURL:$('inputAgentControllerURL'),agentTokenHint:$('agentTokenHint'),inputAgentReportTTL:$('inputAgentReportTTL'),agentInstallCommand:$('agentInstallCommand'),agentCopyInstallBtn:$('agentCopyInstallBtn'),agentPeersEditor:$('agentPeersEditor'),agentAddBtn:$('agentAddBtn'),inputPingMode:$('inputPingMode'),inputPingPort:$('inputPingPort'),inputCheckInterval:$('inputCheckInterval'),inputPingAttempts:$('inputPingAttempts'),inputLatencyWeight:$('inputLatencyWeight'),inputJitterWeight:$('inputJitterWeight'),inputLossWeight:$('inputLossWeight'),inputSwitchImprovement:$('inputSwitchImprovement'),inputSwitchStableSec:$('inputSwitchStableSec'),inputTimePenaltyStartHour:$('inputTimePenaltyStartHour'),inputTimePenaltyEndHour:$('inputTimePenaltyEndHour'),inputTimePenaltyScore:$('inputTimePenaltyScore'),inputTimePenaltyOrgKeywords:$('inputTimePenaltyOrgKeywords'),inputFailedOrphanTTLHours:$('inputFailedOrphanTTLHours'),inputFallbackBaselineIP:$('inputFallbackBaselineIP'),alertWebhookURL:$('inputAlertWebhookURL'),inputBaseDomain:$('inputBaseDomain'),airportProfilesEditor:$('airportProfilesEditor'),airportAddBtn:$('airportAddBtn'),modalCancel:$('modalCancel'),modalSave:$('modalSave'),toast:$('toast'),logFilters:$('logFilters'),logAutofollow:$('logAutofollow'),logMeta:$('logMeta')};
-const ctx=els.canvas.getContext('2d');let latencyHistory=[],ipSamples=[],selectedIP=localStorage.getItem('dlr:selected-ip')||'',selectedAgentID=localStorage.getItem('dlr:selected-agent')||'',selectedAgentViewID=localStorage.getItem('dlr:selected-agent-view')||'',selectedProfileID=localStorage.getItem('dlr:selected-profile')||'',chartRangeDays=[1,7,30].includes(parseInt(localStorage.getItem('dlr:chart-range-days')||'1',10))?parseInt(localStorage.getItem('dlr:chart-range-days')||'1',10):1,lastStatus=null,lastStats=[],lastSamples=[],lastAgentReports=[],countdownTimer=null,chartPts=[],hoveredIdx=-1,pollTimer=null,pollInFlight=false,sampleRequestSeq=0,logsSignature='',activeSettingsTab='airports',lockedScrollY=0,rawLogEntries=[],activeLogFilter='all',autoFollowLogs=true,collapsedLogCycles={},airportProfilesDraft=null,agentPeersDraft=[],agentTokenConfigured=false,chartActiveExpanded=localStorage.getItem('dlr:chart-active-expanded')==='1',chartTimeoutExpanded=localStorage.getItem('dlr:chart-timeout-expanded')==='1',chartArchivedExpanded=localStorage.getItem('dlr:chart-archived-expanded')==='1',ipActiveExpanded=localStorage.getItem('dlr:ip-active-expanded')==='1',ipTimeoutExpanded=localStorage.getItem('dlr:ip-timeout-expanded')==='1',ipArchivedExpanded=localStorage.getItem('dlr:ip-archived-expanded')==='1';
+const els={logBody:$('logBody'),logCount:$('logCount'),statusBadge:$('statusBadge'),profileRail:$('profileRail'),agentSection:$('agentSection'),agentGrid:$('agentGrid'),agentCount:$('agentCount'),regionSection:$('regionSection'),regionHero:$('regionHero'),regionCards:$('regionCards'),regionCount:$('regionCount'),targetDomain:$('targetDomain'),targetSub:$('targetSub'),currentIP:$('currentIP'),currentIPHint:$('currentIPHint'),customDomain:$('customDomain'),customDomainSide:$('customDomainSide'),profileSlugSide:$('profileSlugSide'),profileSlugHint:$('profileSlugHint'),probeSourceDisplay:$('probeSourceDisplay'),latency:$('latency'),latencySub:$('latencySub'),nextCheck:$('nextCheck'),checkInterval:$('checkInterval'),discoveredCount:$('discoveredCount'),pingModeBadge:$('pingModeBadge'),pingMode:$('pingMode'),pingModeHint:$('pingModeHint'),intervalSide:$('intervalSide'),historyCount:$('historyCount'),chartRange:$('chartRange'),chartRangeHint:$('chartRangeHint'),chartIpList:$('chartIpList'),chartFocus:$('chartFocus'),ipStats:$('ipStats'),ipStatsCount:$('ipStatsCount'),canvas:$('latencyChart'),chartEmpty:$('chartEmpty'),checkNowBtn:$('checkNowBtn'),settingsBtn:$('settingsBtn'),settingsModal:$('settingsModal'),inputTarget:$('inputTarget'),inputCustom:$('inputCustom'),inputProbeSource:$('inputProbeSource'),inputCarrier:$('inputCarrier'),inputCloudflareToken:$('inputCloudflareToken'),inputCloudflareZoneID:$('inputCloudflareZoneID'),inputCloudflareRecordID:$('inputCloudflareRecordID'),cloudflareTokenHint:$('cloudflareTokenHint'),inputAgentToken:$('inputAgentToken'),inputAgentControllerURL:$('inputAgentControllerURL'),agentTokenHint:$('agentTokenHint'),inputAgentReportTTL:$('inputAgentReportTTL'),agentInstallCommand:$('agentInstallCommand'),agentCopyInstallBtn:$('agentCopyInstallBtn'),agentPeersEditor:$('agentPeersEditor'),agentAddBtn:$('agentAddBtn'),inputPingMode:$('inputPingMode'),inputPingPort:$('inputPingPort'),inputCheckInterval:$('inputCheckInterval'),inputPingAttempts:$('inputPingAttempts'),inputLatencyWeight:$('inputLatencyWeight'),inputJitterWeight:$('inputJitterWeight'),inputLossWeight:$('inputLossWeight'),inputSwitchImprovement:$('inputSwitchImprovement'),inputSwitchStableSec:$('inputSwitchStableSec'),inputTimePenaltyStartHour:$('inputTimePenaltyStartHour'),inputTimePenaltyEndHour:$('inputTimePenaltyEndHour'),inputTimePenaltyScore:$('inputTimePenaltyScore'),inputTimePenaltyOrgKeywords:$('inputTimePenaltyOrgKeywords'),inputFailedOrphanTTLHours:$('inputFailedOrphanTTLHours'),inputFallbackBaselineIP:$('inputFallbackBaselineIP'),inputAlertWebhookURL:$('inputAlertWebhookURL'),inputBaseDomain:$('inputBaseDomain'),airportProfilesEditor:$('airportProfilesEditor'),airportAddBtn:$('airportAddBtn'),modalCancel:$('modalCancel'),modalSave:$('modalSave'),toast:$('toast'),logFilters:$('logFilters'),logAutofollow:$('logAutofollow'),logMeta:$('logMeta')};
+const ctx=els.canvas.getContext('2d');let latencyHistory=[],ipSamples=[],selectedIP=localStorage.getItem('dlr:selected-ip')||'',selectedAgentID=localStorage.getItem('dlr:selected-agent')||'',selectedAgentViewID=localStorage.getItem('dlr:selected-agent-view')||'',selectedProfileID=localStorage.getItem('dlr:selected-profile')||'',chartRangeDays=[1,7,30].includes(parseInt(localStorage.getItem('dlr:chart-range-days')||'1',10))?parseInt(localStorage.getItem('dlr:chart-range-days')||'1',10):1,lastStatus=null,lastStats=[],lastSamples=[],lastAgentReports=[],countdownTimer=null,chartPts=[],hoveredIdx=-1,pollTimer=null,pollInFlight=false,sampleRequestSeq=0,logsSignature='',activeSettingsTab='airports',lockedScrollY=0,rawLogEntries=[],activeLogFilter='all',autoFollowLogs=true,collapsedLogCycles={},airportProfilesDraft=null,agentPeersDraft=[],agentTokenConfigured=false,chartActiveExpanded=localStorage.getItem('dlr:chart-active-expanded')!=='0',chartTimeoutExpanded=localStorage.getItem('dlr:chart-timeout-expanded')!=='0',chartArchivedExpanded=localStorage.getItem('dlr:chart-archived-expanded')==='1',ipActiveExpanded=localStorage.getItem('dlr:ip-active-expanded')!=='0',ipTimeoutExpanded=localStorage.getItem('dlr:ip-timeout-expanded')!=='0',ipArchivedExpanded=localStorage.getItem('dlr:ip-archived-expanded')==='1';
 let ipCountryFilter=localStorage.getItem('dlr:ip-country-filter')||'all',ipSortMode=localStorage.getItem('dlr:ip-sort-mode')||'avg_latency',ipFilterMenuOpen='';
 function escapeHTML(v){return String(v).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
 function formatTime(v){return v?new Date(v).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'-'}
@@ -983,7 +1131,7 @@ function betterStat(a,b){if(!a)return b;if(!b)return a;const ao=(a.successCount|
 function buildRegionsFromStats(profile,stats,agent,report){const carrier=String(agent&&agent.carrier||report&&report.carrier||'').toLowerCase(),carrierLabel=agent&&agent.carrierLabel||report&&report.carrierLabel||regionLabelByKey(carrier)||'';const groups={};let bestAll=null;(stats||[]).forEach(stat=>{if(!stat||!stat.ip)return;bestAll=betterStat(bestAll,stat);const key=regionFromIP(profile,carrier,stat.ip,stat.geo);if(!groups[key])groups[key]=[];groups[key].push(stat)});const regions=[];if(bestAll){const entryStatus=findViewRegionStatus(profile,carrier,'entry');regions.push({region:'entry',label:carrierLabel+' / 汇总',customDomain:entryStatus&&entryStatus.customDomain||generatedRecordDomain(profile,carrier,'entry'),currentIP:entryStatus&&entryStatus.currentIP||bestAll.ip,bestIP:bestAll.ip,latency:bestAll.avgLatency||bestAll.lastLatency||bestAll.bestLatency||0,score:bestAll.bestScore||bestAll.lastScore||0,candidateCount:(stats||[]).filter(stat=>stat&&stat.ip).length,status:entryStatus&&entryStatus.status||'synced'})}Object.keys(groups).sort().forEach(key=>{if(!groups[key]||!groups[key].length)return;let best=null;groups[key].forEach(stat=>{best=betterStat(best,stat)});const status=findViewRegionStatus(profile,carrier,key);regions.push({region:key,label:status&&status.label||regionLabelByKey(key),customDomain:status&&status.customDomain||generatedRecordDomain(profile,carrier,key),currentIP:status&&status.currentIP||best.ip,bestIP:best.ip,latency:best.avgLatency||best.lastLatency||best.bestLatency||0,score:best.bestScore||best.lastScore||0,candidateCount:groups[key].length,status:status&&status.status||'synced'})});return regions}
 function buildAgentViewRegions(profile,stats){if(isControllerView())return(Array.isArray(profile&&profile.regions)?profile.regions:[]).filter(region=>!String(region.region||'').toLowerCase().startsWith('carrier-'));const report=findAgentReport(currentViewAgentID()),profileReport=currentProfileReport(profile),agent=currentViewAgent();if(!profileReport)return buildRegionsFromStats(profile,stats,agent,report);const carrier=String(agent&&agent.carrier||report&&report.carrier||'').toLowerCase();const resultByIP={};(profileReport.results||[]).forEach(result=>{if(result&&result.ip)resultByIP[result.ip]=result});const ips=(profileReport.resolvedIps&&profileReport.resolvedIps.length?profileReport.resolvedIps:Object.keys(resultByIP)).filter(Boolean);if(!ips.length)return buildRegionsFromStats(profile,stats,agent,report);const groups={};let bestAll=null;ips.forEach(ip=>{const result=resultByIP[ip]||{ip,error:''};bestAll=betterResult(bestAll,result);const key=regionFromResult(profile,carrier,result,stats);if(!groups[key])groups[key]=[];groups[key].push(result)});const regions=[];if(bestAll){const stat=statForIP(stats,bestAll.ip)||{};const entryStatus=findViewRegionStatus(profile,carrier,'entry');regions.push({region:'entry',label:(agent&&agent.carrierLabel||report&&report.carrierLabel||'')+' / 汇总',customDomain:entryStatus&&entryStatus.customDomain||generatedRecordDomain(profile,carrier,'entry'),currentIP:entryStatus&&entryStatus.currentIP||bestAll.ip,bestIP:bestAll.ip,latency:stat.lastLatency||bestAll.latency||0,score:bestAll.score||stat.bestScore||0,candidateCount:ips.length,status:entryStatus&&entryStatus.status||'synced'})}Object.keys(groups).sort().forEach(key=>{if(!groups[key]||!groups[key].length)return;let best=null;groups[key].forEach(result=>{best=betterResult(best,result)});const stat=statForIP(stats,best.ip)||{},status=findViewRegionStatus(profile,carrier,key);regions.push({region:key,label:status&&status.label||regionLabelByKey(key),customDomain:status&&status.customDomain||generatedRecordDomain(profile,carrier,key),currentIP:status&&status.currentIP||best.ip,bestIP:best.ip,latency:stat.lastLatency||best.latency||0,score:best.score||stat.bestScore||0,candidateCount:groups[key].length,status:status&&status.status||'synced'})});return regions}
 function discoveredForView(profile,regions){if(!isControllerView()){const pr=currentProfileReport(profile);if(pr&&Array.isArray(pr.resolvedIps))return pr.resolvedIps.length;const entry=(regions||[]).find(region=>region.region==='entry');if(entry)return entry.candidateCount||0;return filterForCurrentView(lastStats,profile).length}return profile?profile.discoveredCount:0}
-function renderAgents(status){const agents=Array.isArray(status&&status.agents)?status.agents:[];if(!agents.length){els.agentSection.classList.remove('active');els.agentGrid.innerHTML='';els.agentCount.textContent='0 在线';return}const online=agents.filter(agent=>agent.status==='online').length;els.agentSection.classList.add('active');els.agentCount.textContent=online+'/'+agents.length+' 在线';if(!agents.some(agent=>(agent.id||'')===selectedAgentViewID)){const firstRemote=agents.find(agent=>(agent.id||'')!=='controller')||agents[0];selectedAgentViewID=firstRemote&&firstRemote.id||'';if(selectedAgentViewID)localStorage.setItem('dlr:selected-agent-view',selectedAgentViewID)}els.agentGrid.innerHTML=agents.map(agent=>{const state=['online','stale','offline'].includes(agent.status)?agent.status:'offline';const lastSeen=agent.lastSeen?formatDate(agent.lastSeen)+' '+formatTime(agent.lastSeen):'从未上报';const carrier=agent.carrierLabel||agent.carrier||'-';const active=(agent.id||'')===selectedAgentViewID;return'<article class=\"agent-card '+escapeHTML(state)+(active?' active':'')+'\" data-agent-view=\"'+escapeHTML(agent.id||'')+'\"><div class=\"agent-head\"><div class=\"agent-title\"><div class=\"agent-name\">'+escapeHTML(agent.name||agent.id||'-')+'</div><div class=\"agent-id\">'+escapeHTML(agent.id||'-')+'</div></div><div class=\"agent-badges\">'+(active?'<span class=\"agent-view-tag\">当前视角</span>':'')+'<span class=\"agent-state\">'+escapeHTML(agentStatusText(state))+'</span></div></div><div class=\"agent-meta\"><div class=\"agent-meta-item\"><span>运营商</span><strong>'+escapeHTML(carrier)+'</strong></div><div class=\"agent-meta-item\"><span>探测源</span><strong>'+escapeHTML(agent.probeSource||'-')+'</strong></div><div class=\"agent-meta-item\"><span>最后心跳</span><strong title=\"'+escapeHTML(lastSeen)+'\">'+escapeHTML(formatRelativeTime(agent.lastSeen,agent.ageSeconds))+'</strong></div><div class=\"agent-meta-item\"><span>任务数</span><strong class=\"mono\">'+escapeHTML(agent.profileCount||0)+'</strong></div></div><div class=\"agent-detail-action\"><button class=\"mini-btn\" type=\"button\" data-agent-detail=\"'+escapeHTML(agent.id||'')+'\" aria-haspopup=\"dialog\" aria-controls=\"agentTaskDialog\">任务详情</button></div></article>'}).join('');Array.from(els.agentGrid.querySelectorAll('.agent-card[data-agent-view]')).forEach(card=>card.addEventListener('click',e=>{if(e.target.closest('[data-agent-detail]'))return;selectedAgentViewID=card.dataset.agentView||'';if(selectedAgentViewID)localStorage.setItem('dlr:selected-agent-view',selectedAgentViewID);persistSelectedIP('');updateStatus(lastStatus);refreshProfileView();loadSelectedSamples(getCurrentProfile(lastStatus))}))}
+function renderAgents(status){const agents=Array.isArray(status&&status.agents)?status.agents:[];if(!agents.length){els.agentSection.classList.remove('active');els.agentGrid.innerHTML='';els.agentCount.textContent='0 在线';return}const online=agents.filter(agent=>agent.status==='online').length;els.agentSection.classList.add('active');els.agentCount.textContent=online+'/'+agents.length+' 在线';if(!agents.some(agent=>(agent.id||'')===selectedAgentViewID)){const firstRemote=agents.find(agent=>(agent.id||'')!=='controller')||agents[0];selectedAgentViewID=firstRemote&&firstRemote.id||'';if(selectedAgentViewID)localStorage.setItem('dlr:selected-agent-view',selectedAgentViewID)}els.agentGrid.innerHTML=agents.map(agent=>{const state=['online','stale','offline'].includes(agent.status)?agent.status:'offline';const lastSeen=agent.lastSeen?formatDate(agent.lastSeen)+' '+formatTime(agent.lastSeen):'从未上报';const carrier=agent.carrierLabel||agent.carrier||'-';const version=agent.version||'unknown (legacy)';const active=(agent.id||'')===selectedAgentViewID;return'<article class=\"agent-card '+escapeHTML(state)+(active?' active':'')+'\" data-agent-view=\"'+escapeHTML(agent.id||'')+'\"><div class=\"agent-head\"><div class=\"agent-title\"><div class=\"agent-name\">'+escapeHTML(agent.name||agent.id||'-')+'</div><div class=\"agent-id\">'+escapeHTML(agent.id||'-')+'</div></div><div class=\"agent-badges\">'+(active?'<span class=\"agent-view-tag\">当前视角</span>':'')+'<span class=\"agent-state\">'+escapeHTML(agentStatusText(state))+'</span></div></div><div class=\"agent-meta\"><div class=\"agent-meta-item\"><span>运营商</span><strong>'+escapeHTML(carrier)+'</strong></div><div class=\"agent-meta-item\"><span>探测源</span><strong>'+escapeHTML(agent.probeSource||'-')+'</strong></div><div class=\"agent-meta-item\"><span>Version</span><strong class=\"mono\">'+escapeHTML(version)+'</strong></div><div class=\"agent-meta-item\"><span>最后心跳</span><strong title=\"'+escapeHTML(lastSeen)+'\">'+escapeHTML(formatRelativeTime(agent.lastSeen,agent.ageSeconds))+'</strong></div><div class=\"agent-meta-item\"><span>任务数</span><strong class=\"mono\">'+escapeHTML(agent.profileCount||0)+'</strong></div></div><div class=\"agent-detail-action\"><button class=\"mini-btn\" type=\"button\" data-agent-detail=\"'+escapeHTML(agent.id||'')+'\" aria-haspopup=\"dialog\" aria-controls=\"agentTaskDialog\">任务详情</button></div></article>'}).join('');Array.from(els.agentGrid.querySelectorAll('.agent-card[data-agent-view]')).forEach(card=>card.addEventListener('click',e=>{if(e.target.closest('[data-agent-detail]'))return;selectedAgentViewID=card.dataset.agentView||'';if(selectedAgentViewID)localStorage.setItem('dlr:selected-agent-view',selectedAgentViewID);persistSelectedIP('');updateStatus(lastStatus);refreshProfileView();loadSelectedSamples(getCurrentProfile(lastStatus))}))}
 function statusText(v){return({synced:'已同步',switched:'已切换',stabilizing:'观察中',keeping:'保持当前',deleted:'解析已删除',delete_failed:'删除失败',no_candidate:'无可用候选',read_failed:'读取失败',update_failed:'更新失败'}[v]||'等待检测')}
 function failureStatusText(v){return({deleted:'所有解析 IP 均不可用，已删除 Cloudflare A 记录',delete_failed:'所有解析 IP 均不可用，但删除 Cloudflare 记录失败',no_candidate:'本轮没有可用候选',read_failed:'读取 Cloudflare 记录失败',update_failed:'更新 Cloudflare 记录失败'}[v]||'')}
 function regionCode(region,fallback){const raw=String(region&&region.region||fallback||'');const aliases={'carrier-unicom':'CU','carrier-telecom':'CT','carrier-mobile':'CM'};return aliases[raw.toLowerCase()]||raw.toUpperCase()}
@@ -1130,7 +1278,7 @@ els.targetDomain.textContent=profile?(profile.name||profile.id||'-'):(s.targetDo
 els.currentIP.textContent=primaryRegion?(primaryRegion.currentIP||primaryRegion.bestIP||'-'):(profile?'-':(s.currentIP||'-'));
 els.currentIPHint.textContent=primaryRegion?(primaryRegion.label+' · '+(primaryRegion.customDomain||'Cloudflare A 记录')):'Cloudflare A 记录目标';
 els.customDomain.textContent=profile?profileTargetSummary(profile):(s.customDomain||'-');
-els.customDomainSide.textContent=entryRegion?(entryRegion.customDomain||'-'):(profile?'-':(s.customDomain||'-'));
+els.customDomainSide.textContent=entryRegion?(entryRegion.customDomain||'-'):(profile?'-':(s.customDomain||'-'));els.customDomainSide.title=els.customDomainSide.textContent;
 els.profileSlugSide.textContent=profile?(profile.slug||profile.id||'-'):'-';
 els.profileSlugHint.textContent=profile?'用于生成 运营商-'+(profile.slug||profile.id||'-')+'-地区 的子域名':'用于生成 运营商-机场-地区 子域名';
 const viewSource=viewAgent&&viewAgent.probeSource||profile&&profile.probeSource||s.probeSource||'-';
@@ -1145,7 +1293,7 @@ els.intervalSide.textContent=formatSeconds(interval);
 const mode=(s.pingMode||'icmp').toUpperCase();
 els.pingModeBadge.textContent=mode;
 els.pingMode.textContent=mode==='TCP'?'TCP :'+(s.pingPort||443):'ICMP';
-els.pingModeHint.textContent=mode==='TCP'?'检测目标端口连通性':'无需端口，检测主机响应延迟';
+els.pingModeHint.textContent=mode==='TCP'?'检测目标端口连通性':'先检查服务端口，再检测主机响应延迟';
 const latency=primaryRegion?primaryRegion.latency:(profile?0:s.latency),failureText=primaryRegion?failureStatusText(primaryRegion.status):'';
 if(latency>0){els.latency.textContent=latency.toFixed(1)+'ms';els.latencySub.textContent='检测于 '+formatTime(s.lastCheck)}else{els.latency.textContent='-';els.latencySub.textContent=failureText||'暂无检测'}
 setStatus(!!s.isRunning,s.isRunning?'running':'error');
@@ -1161,7 +1309,7 @@ function menuHTML(kind,label,items,current){return'<div class="ip-menu '+(ipFilt
 function renderIPFilterBar(stats,filtered){const countries=[...new Map((stats||[]).map(stat=>{const info=ipRegionInfo(stat);return[info.key,{value:info.key,label:info.label,flag:info.key}]}).sort((a,b)=>a[1].label.localeCompare(b[1].label,'zh-CN'))).values()];if(ipCountryFilter!=='all'&&!countries.some(item=>item.value===ipCountryFilter)){ipCountryFilter='all';localStorage.setItem('dlr:ip-country-filter',ipCountryFilter)}const countryItems=[{value:'all',label:'全部国家/地区',flag:'xx'}].concat(countries),sortItems=[{value:'avg_latency',label:'平均延迟最低'},{value:'best_latency',label:'最快延迟最低'},{value:'jitter',label:'平均抖动最低'},{value:'loss',label:'平均丢包最低'},{value:'success',label:'成功率最高'},{value:'score',label:'综合分最低'},{value:'samples',label:'样本数最多'},{value:'last_active',label:'最近活跃优先'}],countryLabel=(countryItems.find(item=>item.value===ipCountryFilter)||countryItems[0]).label,sortLabel=(sortItems.find(item=>item.value===ipSortMode)||sortItems[0]).label;return'<div class="ip-filter-bar"><div class="ip-filter-left"><span class="ip-filter-label">筛选</span>'+menuHTML('country',countryLabel,countryItems,ipCountryFilter)+'</div><div class="ip-filter-right"><span class="ip-filter-label">排序</span>'+menuHTML('sort',sortLabel,sortItems,ipSortMode)+'<span class="ip-filter-count">显示 '+escapeHTML(filtered.length)+' / '+escapeHTML(stats.length)+' 个</span></div></div>'}
 function attachIPFilterEvents(stats){Array.from(els.ipStats.querySelectorAll('[data-ip-menu-toggle]')).forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();ipFilterMenuOpen=ipFilterMenuOpen===btn.dataset.ipMenuToggle?'':btn.dataset.ipMenuToggle;renderIPStats(stats)}));Array.from(els.ipStats.querySelectorAll('[data-ip-menu]')).forEach(menu=>menu.addEventListener('click',e=>e.stopPropagation()));Array.from(els.ipStats.querySelectorAll('.ip-menu-option')).forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();const menu=btn.closest('[data-ip-menu]'),kind=menu&&menu.dataset.ipMenu,value=btn.dataset.ipMenuValue||'';if(kind==='country'){ipCountryFilter=value||'all';localStorage.setItem('dlr:ip-country-filter',ipCountryFilter)}else if(kind==='sort'){ipSortMode=value||'avg_latency';localStorage.setItem('dlr:ip-sort-mode',ipSortMode)}ipFilterMenuOpen='';renderIPStats(stats)}))}
 function renderIPCard(stat){const firstSeenText=stat.firstSeen?formatDate(stat.firstSeen)+' '+formatTime(stat.firstSeen):'-';const lastActiveText=stat.lastActiveAt?formatDate(stat.lastActiveAt)+' '+formatTime(stat.lastActiveAt):'-';const timedOut=isTimeoutStat(stat),stateLabel=stat.active?'最后活跃':'移除前最后活跃';const agentText=stat.carrierLabel||stat.agentName||'',info=ipRegionInfo(stat),geoText=ipGeoText(stat);return'<article class=\"ip-card'+(statSelected(stat)?' active':'')+(timedOut?' timeout':'')+(stat.active?'':' orphaned')+'\" data-ip=\"'+escapeHTML(stat.ip)+'\" data-agent=\"'+escapeHTML(stat.agentId||'')+'\"><div class=\"ip-card-top\"><div class=\"ip-card-head\"><h3>'+escapeHTML(stat.ip)+'</h3><span class=\"geo-badge'+(geoText==='未知'?' muted':'')+'\">'+geoFlagHTML(stat.geo,info.key)+escapeHTML(geoText)+'</span></div><div class=\"ip-side\">'+(agentText?'<span class=\"ip-status-tag\">'+escapeHTML(agentText)+'</span>':'')+(timedOut?'<span class=\"ip-status-tag timeout\">探测超时</span>':(stat.active?'':'<span class=\"ip-status-tag\">已从 DNS 移除</span>'))+'<span class=\"ip-sample-count\">n='+escapeHTML(formatCount(stat.seenCount))+'</span></div></div><div class=\"ip-meta\"><div class=\"ip-meta-item\"><div class=\"ip-meta-label\">平均延迟</div><div class=\"ip-meta-value\">'+escapeHTML(formatMs(stat.avgLatency))+'</div></div><div class=\"ip-meta-item\"><div class=\"ip-meta-label\">综合评分</div><div class=\"ip-meta-value\">'+escapeHTML(stat.bestScore>0?stat.bestScore.toFixed(2):'-')+'</div></div><div class=\"ip-meta-item\"><div class=\"ip-meta-label\">平均抖动</div><div class=\"ip-meta-value\">'+escapeHTML(formatMs(stat.avgJitter))+'</div></div><div class=\"ip-meta-item\"><div class=\"ip-meta-label\">平均丢包</div><div class=\"ip-meta-value\">'+escapeHTML(stat.avgLossRate.toFixed(0)+'%')+'</div></div><div class=\"ip-meta-item\"><div class=\"ip-meta-label\">成功率</div><div class=\"ip-meta-value\">'+escapeHTML(stat.successRate.toFixed(0)+'%')+'</div></div><div class=\"ip-meta-item\"><div class=\"ip-meta-label\">最快延迟</div><div class=\"ip-meta-value\">'+escapeHTML(formatMs(stat.bestLatency))+'</div></div></div><div class=\"ip-note\">首次上线：'+escapeHTML(firstSeenText)+'，'+escapeHTML(stateLabel)+'：'+escapeHTML(lastActiveText)+'，最近一次 '+escapeHTML(formatMs(stat.lastLatency))+(stat.lastError?'，最近错误：'+escapeHTML(stat.lastError):'')+'</div></article>'}
-function renderIPGroup(title,sub,items,key,expanded,limit){if(!items.length)return'';const shouldExpand=expanded||key==='archived'&&items.some(statSelected);const needsToggle=items.length>limit||key==='archived';const visible=(items.length>limit&&!shouldExpand)?limitItems(items,limit):items;const toggleText=shouldExpand?'收起':'展开';return'<section class=\"ip-group'+((needsToggle&&!shouldExpand)?' collapsed':'')+'\" data-ip-group=\"'+key+'\"><div class=\"ip-group-head\"><div class=\"ip-group-meta\"><span class=\"ip-group-title\">'+title+'</span><span class=\"ip-group-sub\">'+sub.replace('{count}',String(items.length))+'</span></div>'+(needsToggle?'<button class=\"cluster-toggle'+(shouldExpand?' active':'')+'\" type=\"button\" data-ip-toggle=\"'+key+'\">'+toggleText+'</button>':'')+'</div><div class=\"ip-stats-grid\">'+visible.map(renderIPCard).join('')+'</div></section>'}
+function renderIPGroup(title,sub,items,key,expanded,limit){if(!items.length)return'';const isArchived=key==='archived',isTimeout=key==='timeout';const shouldExpand=expanded||items.some(statSelected);const needsToggle=items.length>limit||isArchived||isTimeout;const toggleText=shouldExpand?'收起':'展开';return'<section class=\"ip-group'+(!shouldExpand?' collapsed':'')+'\" data-ip-group=\"'+key+'\"><div class=\"ip-group-head\"><div class=\"ip-group-meta\"><span class=\"ip-group-title\">'+title+'</span><span class=\"ip-group-sub\">'+sub.replace('{count}',String(items.length))+'</span></div>'+(needsToggle?'<button class=\"cluster-toggle'+(shouldExpand?' active':'')+'\" type=\"button\" data-ip-toggle=\"'+key+'\">'+toggleText+'</button>':'')+'</div><div class=\"ip-stats-grid\">'+items.map(renderIPCard).join('')+'</div></section>'}
 function renderIPStats(stats){els.ipStatsCount.textContent=stats.length+' 个 IP';if(!stats.length){els.ipStats.innerHTML='<div class="ip-empty">暂时还没有足够样本，跑几轮检测后这里会开始出现各 IP 的本地延迟表现。</div>';renderChartIpList([]);return}const filtered=filteredIPStats(stats);if(filtered.length&&(!selectedIP||!filtered.some(statSelected))){const best=selectBestIP(filtered);persistSelectedIP(best?best.ip:'',best?best.agentId||'':'')}const timeout=sortIPStats(filtered.filter(isTimeoutStat));const active=sortIPStats(filtered.filter(stat=>stat.active&&!isTimeoutStat(stat)));const archived=sortIPStats(filtered.filter(stat=>!stat.active));const timeoutOpen=ipTimeoutExpanded||timeout.some(statSelected),archivedOpen=ipArchivedExpanded||archived.some(statSelected);renderChartIpList(filtered.length?filtered:stats);els.ipStats.innerHTML=renderIPFilterBar(stats,filtered)+(filtered.length?'<div class=\"ip-groups\">'+renderIPGroup('当前可用节点','DNS 仍解析到且最近探测可用，共 {count} 个',active,'active',ipActiveExpanded,4)+renderIPGroup('探测超时节点','DNS 仍解析到，但最近探测 timeout，共 {count} 个',timeout,'timeout',timeoutOpen,4)+renderIPGroup('历史节点归档','已从 DNS 移除，共 {count} 个',archived,'archived',archivedOpen,2)+'</div>':'<div class="ip-empty">当前筛选条件下没有 IP，换个国家/地区或排序条件看看。</div>');attachIPFilterEvents(stats);Array.from(els.ipStats.querySelectorAll('.ip-card')).forEach(card=>card.addEventListener('click',()=>selectIPAndRefresh(card.dataset.ip,card.dataset.agent||'',stats)));Array.from(els.ipStats.querySelectorAll('[data-ip-toggle]')).forEach(btn=>btn.addEventListener('click',()=>{const key=btn.dataset.ipToggle;if(key==='active'){ipActiveExpanded=!ipActiveExpanded;setStoredFlag('dlr:ip-active-expanded',ipActiveExpanded)}else if(key==='timeout'){ipTimeoutExpanded=!ipTimeoutExpanded;setStoredFlag('dlr:ip-timeout-expanded',ipTimeoutExpanded)}else{ipArchivedExpanded=!ipArchivedExpanded;setStoredFlag('dlr:ip-archived-expanded',ipArchivedExpanded)}renderIPStats(stats)}))}
 function parseLogEntry(entry,index){const fallbackNow=new Date();const stampTime=entry&&entry.time?entry.time:fallbackNow.toISOString();const msg=entry&&entry.line?entry.line:'';const match=msg.match(/^(?:(\d{4}\/\d{2}\/\d{2})\s+)?(\d{2}:\d{2}:\d{2})\s+(.*)$/);const rawBody=match?match[3]:msg;if(shouldHideLogLine(rawBody))return null;let category='system';if(rawBody.includes('[ping]'))category='ping';else if(rawBody.includes('[check]')||rawBody.includes('[update]')||rawBody.includes('[error]'))category='decision';return{index,time:stampTime,timeText:match?(match[1]?match[1]+' '+match[2]:match[2]):formatTime(stampTime),dateText:formatDate(stampTime),body:rawBody,category,isCycleStart:rawBody.includes('[check] resolving'),isManualTrigger:rawBody.includes('[check] manual trigger')}} 
 function matchesLogFilter(item){if(activeLogFilter==='all')return true;if(activeLogFilter==='ping')return item.category==='ping';if(activeLogFilter==='decision')return item.category==='decision';return item.category==='system'}
@@ -1179,7 +1327,7 @@ function setLogFilter(filter){activeLogFilter=filter;Array.from(els.logFilters.q
 async function pollOnce(){if(pollInFlight)return;pollInFlight=true;try{const [statusRes,historyRes,ipStatsRes,agentReportsRes,logsRes]=await Promise.all([fetch('/api/status',{cache:'no-store'}),fetch('/api/history',{cache:'no-store'}),fetch('/api/ip-stats',{cache:'no-store'}),fetch('/api/agent/reports',{cache:'no-store'}),fetch('/api/logs',{cache:'no-store'})]);const [statusData,historyData,ipStatsData,agentReportsData,logsData]=await Promise.all([statusRes.json(),historyRes.json(),ipStatsRes.json(),agentReportsRes.json(),logsRes.json()]);lastStatus=statusData;lastStats=ipStatsData||[];lastAgentReports=agentReportsData||[];latencyHistory=historyData||[];updateStatus(statusData);refreshProfileView();await loadSelectedSamples(getCurrentProfile(statusData));renderLogs(logsData||[]);setStatus(true,statusData&&statusData.isRunning?'running':'online')}catch(err){setStatus(false,'disconnected')}finally{pollInFlight=false}}
 function startPolling(){pollOnce();if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(pollOnce,3000)}
 function showToast(msg,err){els.toast.textContent=msg;els.toast.className='toast show'+(err?' error':'');setTimeout(()=>{els.toast.className='toast'},3000)}
-function updatePortFieldState(){els.inputPingPort.disabled=els.inputPingMode.value==='icmp'}
+function updatePortFieldState(){els.inputPingPort.disabled=false}
 function configureSettingsMode(hasAirports){document.querySelectorAll('.legacy-setting').forEach(el=>el.style.display=hasAirports?'none':'');if(hasAirports&&activeSettingsTab==='basic')activeSettingsTab='airports';switchSettingsTab(activeSettingsTab)}
 function switchSettingsTab(tab){activeSettingsTab=tab;document.querySelectorAll('.settings-tab').forEach(btn=>{const active=btn.dataset.tab===tab;btn.classList.toggle('active',active);btn.setAttribute('aria-selected',active?'true':'false')});document.querySelectorAll('.settings-panel').forEach(panel=>panel.classList.toggle('active',panel.dataset.panel===tab));if(els.modalSave)els.modalSave.textContent=tab==='airports'?'保存机场入口':tab==='cloudflare'?'保存 Cloudflare':tab==='agents'?'保存 Agent':'保存设置'}
 function lockBodyScroll(){lockedScrollY=window.scrollY||window.pageYOffset||0;document.body.classList.add('modal-open');document.body.style.top='-'+lockedScrollY+'px'}
@@ -1187,11 +1335,11 @@ function unlockBodyScroll(){document.body.classList.remove('modal-open');documen
 function emptyAirportProfile(){const n=(airportProfilesDraft&&airportProfilesDraft.airport_profiles?airportProfilesDraft.airport_profiles.length+1:1);return{id:'airport'+n,name:'新机场 '+n,slug:'ap'+n,target_domains:[''],probe_source:els.inputProbeSource.value.trim()||'城市运营商',carrier:'unicom'}}
 function renderAirportProfilesEditor(){const profiles=(airportProfilesDraft&&airportProfilesDraft.airport_profiles)||[];els.inputBaseDomain.value=(airportProfilesDraft&&airportProfilesDraft.base_domain)||'';if(!profiles.length){els.airportProfilesEditor.innerHTML='<div class="airport-empty">还没有机场配置，点“新增机场”先建一个。</div>';return}els.airportProfilesEditor.innerHTML=profiles.map((p,i)=>'<section class="airport-editor" data-airport-index="'+i+'"><div class="airport-editor-head"><div class="airport-editor-title">机场 '+(i+1)+'</div><div class="airport-editor-actions"><button class="mini-btn danger" type="button" data-airport-remove="'+i+'">删除</button></div></div><div class="form-grid"><div class="field"><label>显示名</label><input type="text" data-airport-field="name" value="'+escapeHTML(p.name||'')+'" placeholder="机场 A" autocomplete="off"></div><div class="field"><label>缩写</label><input type="text" data-airport-field="slug" value="'+escapeHTML(p.slug||p.id||'')+'" placeholder="airport-a" autocomplete="off"><div class="hint">只用英文、数字、短横线，例如 airport-a、proxy-b。</div></div><div class="field"><label>探测源</label><input type="text" data-airport-field="probe_source" value="'+escapeHTML(p.probe_source||'')+'" placeholder="城市运营商" autocomplete="off"></div><div class="field"><label>运营商策略</label><select data-airport-field="carrier"><option value="unicom" '+((p.carrier==='unicom'||p.carrier==='auto'||p.carrier==='all')?'selected':'')+'>中国联通</option><option value="telecom" '+(p.carrier==='telecom'?'selected':'')+'>中国电信</option><option value="mobile" '+(p.carrier==='mobile'?'selected':'')+'>中国移动</option></select></div><div class="field wide"><label>入口域名</label><textarea data-airport-field="target_domains" spellcheck="false" placeholder="entry-a-1.example.com&#10;entry-a-2.example.com">'+escapeHTML((p.target_domains||[]).join('\n'))+'</textarea><div class="hint">每行一个入口域名，保存后本机场会合并解析这些域名得到的 IP。</div></div></div></section>').join('');Array.from(els.airportProfilesEditor.querySelectorAll('[data-airport-remove]')).forEach(btn=>btn.addEventListener('click',()=>{const idx=parseInt(btn.dataset.airportRemove,10);if(profiles.length<=1)return showToast('至少保留一个机场配置',true);profiles.splice(idx,1);renderAirportProfilesEditor()}))}
 function collectAirportProfiles(){const profiles=[];Array.from(els.airportProfilesEditor.querySelectorAll('.airport-editor')).forEach(card=>{const get=field=>card.querySelector('[data-airport-field="'+field+'"]');const slug=(get('slug').value||'').trim();profiles.push({id:slug,name:(get('name').value||'').trim(),slug:slug,probe_source:(get('probe_source').value||'').trim(),carrier:get('carrier').value||'auto',target_domains:(get('target_domains').value||'').split(/\r?\n/).map(v=>v.trim()).filter(Boolean)})});return{base_domain:els.inputBaseDomain.value.trim(),airport_profiles:profiles}}
-const AGENT_INSTALLER_URL='https://raw.githubusercontent.com/kuaichu/DnslatencyRouter/main/scripts/install-agent.sh';
+const AGENT_INSTALLER_PATH='/api/agent/install.sh';
 function randomToken(){const bytes=new Uint8Array(24);if(window.crypto&&crypto.getRandomValues)crypto.getRandomValues(bytes);else for(let i=0;i<bytes.length;i++)bytes[i]=Math.floor(Math.random()*256);return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('')}
 function shellQuoteJS(value){return'\''+String(value||'').replace(/'/g,'\'"\'"\'')+'\''}
 function agentControllerInputValue(){return(els.inputAgentControllerURL&&els.inputAgentControllerURL.value.trim())||window.location.origin}
-function localAgentInstallCommand(token){const interval=parseInt(els.inputCheckInterval&&els.inputCheckInterval.value,10)||300;let cmd='curl -fsSL '+shellQuoteJS(AGENT_INSTALLER_URL)+' | bash -s -- --controller '+shellQuoteJS(agentControllerInputValue());if(token)cmd+=' --token '+shellQuoteJS(token);cmd+=' --interval '+shellQuoteJS(String(interval));return cmd}
+function localAgentInstallCommand(token){const interval=parseInt(els.inputCheckInterval&&els.inputCheckInterval.value,10)||300;const controllerURL=agentControllerInputValue().replace(/\/+$/,'');let cmd='curl -fsSL '+shellQuoteJS(controllerURL+AGENT_INSTALLER_PATH)+' | bash -s -- --controller '+shellQuoteJS(controllerURL);if(token)cmd+=' --token '+shellQuoteJS(token);cmd+=' --interval '+shellQuoteJS(String(interval));return cmd}
 function updateAgentInstallCommand(){const typedToken=(els.inputAgentToken&&els.inputAgentToken.value||'').trim();if(!agentTokenConfigured&&typedToken){els.agentInstallCommand.value=localAgentInstallCommand(typedToken);return Promise.resolve()}els.agentInstallCommand.value='加载安装命令中...';return fetch('/api/agent/install-command',{cache:'no-store'}).then(r=>r.json().then(d=>({ok:r.ok,data:d}))).then(res=>{if(res.ok&&res.data&&res.data.command){els.agentInstallCommand.value=res.data.command;return}els.agentInstallCommand.value=typedToken?localAgentInstallCommand(typedToken):'请先保存 Agent 通信 Token 后再复制安装命令'}).catch(()=>{els.agentInstallCommand.value=typedToken?localAgentInstallCommand(typedToken):'请先保存 Agent 通信 Token 后再复制安装命令'})}
 function mergeAgentPeers(configured,statuses){const out=[],seen={};(configured||[]).forEach(p=>{const id=p.id||'';if(!id)return;seen[id.toLowerCase()]=true;out.push({id,name:p.name||'',probe_source:p.probe_source||'',carrier:p.carrier||'auto'})});(statuses||[]).forEach(agent=>{const id=agent.id||'';if(!id||id.toLowerCase()==='controller'||seen[id.toLowerCase()])return;seen[id.toLowerCase()]=true;out.push({id,name:agent.name||id,probe_source:agent.probeSource||agent.probe_source||'',carrier:agent.carrier||'auto'})});return out}
 function emptyAgentPeer(){const n=(agentPeersDraft||[]).length+1;if(n===1)return{id:'ct-ningbo-01',name:'宁波电信 01',probe_source:'宁波电信',carrier:'telecom'};return{id:'agent-'+n,name:'新 Agent '+n,probe_source:'城市运营商',carrier:'auto'}}
@@ -1285,6 +1433,39 @@ agentTaskDialog.addEventListener('click',event=>{
   const rect=agentTaskDialog.getBoundingClientRect();
   if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)closeAgentTaskDetails();
 });
+
+const anchorLinks=Array.from(document.querySelectorAll('.anchor-link'));
+if(anchorLinks.length){
+  const navSectionIds=['heroSection','agentSection','regionSection','chartSection','ipSection','logsSection'];
+  anchorLinks.forEach(link=>{
+    link.addEventListener('click',()=>{
+      anchorLinks.forEach(l=>l.classList.remove('active'));
+      link.classList.add('active');
+    });
+  });
+  window.addEventListener('scroll',()=>{
+    const scrollPos=window.scrollY+130;
+    let currentId='';
+    for(const id of navSectionIds){
+      const el=document.getElementById(id);
+      if(el&&el.offsetTop<=scrollPos)currentId=id;
+    }
+    if((window.innerHeight+window.scrollY)>=document.body.offsetHeight-40){
+      currentId='logsSection';
+    }
+    if(currentId){
+      anchorLinks.forEach(link=>link.classList.toggle('active',link.getAttribute('href')==='#'+currentId));
+    }
+  },{passive:true});
+}
+if(els.statusBadge){
+  els.statusBadge.style.cursor='pointer';
+  els.statusBadge.title='点击查看状态 / 异常日志';
+  els.statusBadge.addEventListener('click',()=>{
+    const target=document.getElementById(els.statusBadge.classList.contains('error')?'logsSection':'heroSection');
+    if(target)target.scrollIntoView({behavior:'smooth'});
+  });
+}
 
 switchSettingsTab(activeSettingsTab);updateLogAutofollowButton();renderChartRange();renderIPStats([]);drawChart();startPolling();
 </script>

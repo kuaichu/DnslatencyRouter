@@ -122,6 +122,7 @@ func runJob(cfg *config.Config, job *JobResponse) Report {
 	report := Report{
 		AgentID:      cfg.Agent.ID,
 		AgentName:    name,
+		Version:      Version,
 		Carrier:      carrier,
 		CarrierLabel: config.CarrierLabel(carrier),
 		ProbeSource:  source,

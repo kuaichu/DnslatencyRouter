@@ -277,7 +277,8 @@ func PingTCP(ip string, port int, timeout time.Duration) Result {
 	}
 }
 
-func scoreResult(latencyMs, jitterMs, lossRate, latencyWeight, jitterWeight, lossWeight float64) float64 {
+// Score combines latency/jitter in milliseconds and loss in percentage points.
+func Score(latencyMs, jitterMs, lossRate, latencyWeight, jitterWeight, lossWeight float64) float64 {
 	return latencyMs*latencyWeight + jitterMs*jitterWeight + lossRate*lossWeight
 }
 
@@ -325,12 +326,15 @@ func aggregateResults(ip string, attempts []Result, latencyWeight, jitterWeight,
 		out.Jitter = time.Duration(jitterMs * float64(time.Millisecond))
 	}
 
-	out.Score = scoreResult(avgLatency, float64(out.Jitter.Microseconds())/1000.0, out.LossRate, latencyWeight, jitterWeight, lossWeight)
+	out.Score = Score(avgLatency, float64(out.Jitter.Microseconds())/1000.0, out.LossRate, latencyWeight, jitterWeight, lossWeight)
 	return out
 }
 
 // PingAll probes all given IPs concurrently and returns aggregated results sorted by score (best first).
-// mode: "icmp" or "tcp". For TCP, port is used; for ICMP, port is ignored.
+// mode: "icmp" or "tcp". The configured port is always checked for reachability;
+// in TCP mode the regular probes provide that check, while ICMP mode performs
+// one TCP connect before sending ICMP probes. An IP with an unavailable port is
+// returned as a failed result so it cannot be selected for routing.
 func PingAll(ips []string, mode string, port int, timeout time.Duration, attempts int, latencyWeight, jitterWeight, lossWeight float64) []Result {
 	if len(ips) == 0 {
 		return nil
@@ -347,6 +351,20 @@ func PingAll(ips []string, mode string, port int, timeout time.Duration, attempt
 		go func(idx int, addr string) {
 			defer wg.Done()
 			started := time.Now()
+			if mode == "icmp" && port > 0 {
+				portCheck := PingTCP(addr, port, timeout)
+				if portCheck.Err != nil {
+					portCheck.Attempts = 1
+					portCheck.Successes = 0
+					portCheck.LossRate = 100
+					portCheck.LastErr = fmt.Errorf("port %d unavailable: %w", port, portCheck.Err)
+					portCheck.Err = portCheck.LastErr
+					portCheck.StartedAt = started
+					portCheck.FinishedAt = time.Now()
+					results[idx] = portCheck
+					return
+				}
+			}
 			probes := make([]Result, 0, attempts)
 			for attempt := 0; attempt < attempts; attempt++ {
 				switch mode {

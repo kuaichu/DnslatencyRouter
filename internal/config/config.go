@@ -2,13 +2,14 @@ package config
 
 import (
 	"fmt"
-	"net"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"dns-latency-router/internal/checker"
 	"gopkg.in/yaml.v3"
 )
 
@@ -79,6 +80,7 @@ type Config struct {
 	LossWeight             float64           `yaml:"selection_loss_weight"`
 	SwitchImprovement      float64           `yaml:"switch_improvement_percent"`
 	SwitchStableSec        int               `yaml:"switch_stable_seconds"`
+	FailureConfirmCycles   int               `yaml:"failure_confirm_cycles"`
 	FailedOrphanTTLHours   int               `yaml:"failed_orphan_ttl_hours"`
 	FallbackBaselineIP     string            `yaml:"fallback_baseline_ip"`
 	AlertWebhookURL        string            `yaml:"alert_webhook_url"`
@@ -118,6 +120,7 @@ func Load(path string) (*Config, error) {
 		SwitchImprovement:      15,
 		SwitchStableSec:        120,
 		FailedOrphanTTLHours:   24,
+		FailureConfirmCycles:   3,
 		TimePenaltyStartHour:   0,
 		TimePenaltyEndHour:     5,
 		TimePenaltyScore:       60,
@@ -185,8 +188,17 @@ func (cfg *Config) Normalize() error {
 	if cfg.TargetDomain == "" && len(cfg.AirportProfiles) == 0 && !cfg.IsAgentMode() {
 		return fmt.Errorf("target_domain is required")
 	}
+	if cfg.FailureConfirmCycles <= 0 {
+		cfg.FailureConfirmCycles = 3
+	}
 	if cfg.PingAttempts < 1 {
 		cfg.PingAttempts = 1
+	}
+	if cfg.PingPort <= 0 {
+		cfg.PingPort = 443
+	}
+	if cfg.PingPort > 65535 {
+		return fmt.Errorf("ping_port must be between 1 and 65535")
 	}
 	if cfg.SwitchStableSec < 0 {
 		cfg.SwitchStableSec = 0
@@ -203,8 +215,21 @@ func (cfg *Config) Normalize() error {
 	if cfg.TimePenaltyScore < 0 {
 		return fmt.Errorf("time_penalty_score cannot be negative")
 	}
-	if cfg.FallbackBaselineIP != "" && net.ParseIP(strings.TrimSpace(cfg.FallbackBaselineIP)) == nil {
-		return fmt.Errorf("fallback_baseline_ip must be a valid IP address")
+	for name, value := range map[string]float64{
+		"selection_latency_weight": cfg.LatencyWeight, "selection_jitter_weight": cfg.JitterWeight,
+		"selection_loss_weight": cfg.LossWeight, "switch_improvement_percent": cfg.SwitchImprovement,
+		"ping_min_threshold_ms": cfg.PingMinThresholdMs, "time_penalty_score": cfg.TimePenaltyScore,
+	} {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return fmt.Errorf("%s must be finite and non-negative", name)
+		}
+	}
+	if cfg.FallbackBaselineIP != "" {
+		ip, ok := checker.NormalizeCandidateIP(cfg.FallbackBaselineIP)
+		if !ok {
+			return fmt.Errorf("fallback_baseline_ip must be a usable public IPv4 address")
+		}
+		cfg.FallbackBaselineIP = ip
 	}
 	if cfg.AlertWebhookURL != "" {
 		if _, err := url.ParseRequestURI(strings.TrimSpace(cfg.AlertWebhookURL)); err != nil {

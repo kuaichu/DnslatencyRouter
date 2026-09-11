@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -25,6 +26,7 @@ type switchController struct {
 	routes         map[string]*routeSwitchState
 	candidateIP    string
 	candidateSince time.Time
+	failures       failureObservation
 	outageActive   bool
 	lastAlertAt    time.Time
 	orgCache       map[string]string
@@ -34,6 +36,7 @@ type switchController struct {
 type routeSwitchState struct {
 	candidateIP    string
 	candidateSince time.Time
+	failures       failureObservation
 	outageActive   bool
 	lastAlertAt    time.Time
 }
@@ -52,6 +55,7 @@ func (c *switchController) reset() {
 
 func (c *switchController) clearOutage() {
 	c.outageActive = false
+	c.failures = failureObservation{}
 }
 
 func (c *switchController) orgForIP(ip string) string {
@@ -107,6 +111,7 @@ func (c *switchController) resetRoute(key string) {
 
 func (c *switchController) clearRouteOutage(key string) {
 	c.route(key).outageActive = false
+	c.route(key).failures = failureObservation{}
 }
 
 func (c *switchController) shouldSendRouteAlert(key string, now time.Time) bool {
@@ -143,8 +148,14 @@ func shouldReplaceCurrent(current, candidate *checker.Result, cfg *config.Config
 	if candidate == nil || candidate.Err != nil {
 		return false
 	}
-	if current == nil || current.Err != nil || current.Score <= 0 {
+	if current == nil {
+		return false
+	}
+	if current.Err != nil {
 		return true
+	}
+	if current.Score <= 0 || math.IsNaN(current.Score) || math.IsInf(current.Score, 0) {
+		return false
 	}
 	improvement := (current.Score - candidate.Score) / current.Score * 100
 	return improvement >= cfg.SwitchImprovement
@@ -173,10 +184,10 @@ func recordTargetLabel(rec config.RegionRecord) string {
 }
 
 func recordNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "does not exist")
+	return errors.Is(err, cloudflare.ErrRecordNotFound)
 }
 
-func deleteRegionRecord(cf *cloudflare.Client, rec config.RegionRecord) error {
+func deleteRegionRecord(cf dnsRecordClient, rec config.RegionRecord) error {
 	if rec.RecordID != "" {
 		return cf.DeleteRecord()
 	}
@@ -483,17 +494,17 @@ func regionRecordFor(cfg *config.Config, profile config.AirportProfile, region s
 }
 
 func bestHealthyResult(results []checker.Result, cfg *config.Config) *checker.Result {
+	var best *checker.Result
 	for i := range results {
 		r := &results[i]
-		if r.Err != nil {
+		if r.Err != nil || r.Latency < cfg.PingMinThreshold || math.IsNaN(r.Score) || math.IsInf(r.Score, 0) {
 			continue
 		}
-		if r.Latency < cfg.PingMinThreshold {
-			continue
+		if best == nil || r.Score < best.Score || (r.Score == best.Score && r.Latency < best.Latency) {
+			best = r
 		}
-		return r
 	}
-	return nil
+	return best
 }
 
 func resolveProfileIPs(profile config.AirportProfile, dnsServers []string) ([]string, error) {
@@ -611,7 +622,7 @@ func runAirportProfileOnce(cfg *config.Config, profile config.AirportProfile, ws
 		mode = "icmp"
 	}
 	if mode == "icmp" {
-		log.Printf("[check] [%s] pinging %d IP(s) via ICMP ...", profile.ID, len(ips))
+		log.Printf("[check] [%s] checking port %d and pinging %d IP(s) via ICMP ...", profile.ID, cfg.PingPort, len(ips))
 	} else {
 		log.Printf("[check] [%s] pinging %d IP(s) on port %d ...", profile.ID, len(ips), cfg.PingPort)
 	}
@@ -676,7 +687,7 @@ func runAirportProfileOnce(cfg *config.Config, profile config.AirportProfile, ws
 	profileStatus.Regions = nil
 	profileStatus.DiscoveredCount = len(ips)
 	if profile.EntryRecord.RecordID != "" || profile.EntryRecord.CustomDomain != "" {
-		profileStatus.Regions = append(profileStatus.Regions, runProfileRecordDecision(cfg, profile, "entry", profile.EntryRecord, results, sc, now))
+		profileStatus.Regions = append(profileStatus.Regions, runProfileRecordDecision(cfg, profile, "entry", profile.EntryRecord, results, sc, now, true))
 	}
 	profileStatus.Regions = append(profileStatus.Regions, runCarrierRecordDecisions(cfg, profile, results, ws, sc, now)...)
 	for _, region := range sortedRegionKeys(resultsByRegion) {
@@ -685,7 +696,7 @@ func runAirportProfileOnce(cfg *config.Config, profile config.AirportProfile, ws
 		}
 		rec := regionRecordFor(cfg, profile, region)
 		regionResults := resultsByRegion[region]
-		profileStatus.Regions = append(profileStatus.Regions, runProfileRecordDecision(cfg, profile, region, rec, regionResults, sc, now))
+		profileStatus.Regions = append(profileStatus.Regions, runProfileRecordDecision(cfg, profile, region, rec, regionResults, sc, now, true))
 	}
 	profileStatus.Regions = append(profileStatus.Regions, runAgentRegionRecordDecisions(cfg, profile, ws, sc, now)...)
 	return profileStatus
@@ -738,7 +749,7 @@ func runCarrierRecordDecisions(cfg *config.Config, profile config.AirportProfile
 
 	localCarrier := config.EffectiveCarrierFor(profile.Carrier, profile.ProbeSource)
 	if rec, ok := profile.CarrierRecords[localCarrier]; ok {
-		statuses = append(statuses, runProfileRecordDecision(cfg, profile, carrierRecordRegion(localCarrier), rec, localResults, sc, now))
+		statuses = append(statuses, runProfileRecordDecision(cfg, profile, carrierRecordRegion(localCarrier), rec, localResults, sc, now, true))
 		used[localCarrier] = true
 	}
 
@@ -746,6 +757,9 @@ func runCarrierRecordDecisions(cfg *config.Config, profile config.AirportProfile
 		ttl := time.Duration(cfg.Agent.ReportTTLSeconds) * time.Second
 		latestByCarrier := make(map[string]agent.Report)
 		for _, report := range ws.AgentReports(ttl) {
+			if task := findAgentProfileReport(report, profile.ID); task == nil || task.Error != "" {
+				continue
+			}
 			carrier := config.NormalizeCarrier(report.Carrier)
 			if _, ok := profile.CarrierRecords[carrier]; !ok {
 				continue
@@ -767,7 +781,7 @@ func runCarrierRecordDecisions(cfg *config.Config, profile config.AirportProfile
 			if profileReport == nil {
 				continue
 			}
-			results := checkerResultsFromAgent(profileReport.Results)
+			results := checkerResultsFromAgent(profileReport.Results, cfg, profileReport.FinishedAt)
 			applyTimePenalty(cfg, sc, results, now)
 			rec := profile.CarrierRecords[carrier]
 			statuses = append(statuses, runProfileRecordDecision(cfg, profile, carrierRecordRegion(carrier), rec, results, sc, now))
@@ -793,6 +807,9 @@ func runAgentRegionRecordDecisions(cfg *config.Config, profile config.AirportPro
 	ttl := time.Duration(cfg.Agent.ReportTTLSeconds) * time.Second
 	latestByCarrier := make(map[string]agent.Report)
 	for _, report := range ws.AgentReports(ttl) {
+		if task := findAgentProfileReport(report, profile.ID); task == nil || task.Error != "" {
+			continue
+		}
 		carrier := config.NormalizeCarrier(report.Carrier)
 		if carrier == "" || carrier == "auto" || carrier == "all" || (skipLocalCarrier && carrier == localCarrier) {
 			continue
@@ -816,7 +833,7 @@ func runAgentRegionRecordDecisions(cfg *config.Config, profile config.AirportPro
 		if profileReport == nil {
 			continue
 		}
-		results := checkerResultsFromAgent(profileReport.Results)
+		results := checkerResultsFromAgent(profileReport.Results, cfg, profileReport.FinishedAt)
 		applyTimePenalty(cfg, sc, results, now)
 		carrierProfile := profile
 		carrierProfile.Carrier = carrier
@@ -855,9 +872,12 @@ func findAgentProfileReport(report agent.Report, profileID string) *agent.Profil
 	return nil
 }
 
-func checkerResultsFromAgent(results []agent.Result) []checker.Result {
+func checkerResultsFromAgent(results []agent.Result, cfg *config.Config, observedAt time.Time) []checker.Result {
 	out := make([]checker.Result, 0, len(results))
 	for _, result := range results {
+		if agent.ValidateResult(result) != nil {
+			continue
+		}
 		ip, ok := checker.NormalizeCandidateIP(result.IP)
 		if !ok {
 			continue
@@ -866,14 +886,21 @@ func checkerResultsFromAgent(results []agent.Result) []checker.Result {
 			IP:        ip,
 			Latency:   time.Duration(result.Latency * float64(time.Millisecond)),
 			Jitter:    time.Duration(result.Jitter * float64(time.Millisecond)),
-			LossRate:  result.LossRate,
+			LossRate:  float64(result.Attempts-result.Successes) / float64(result.Attempts) * 100,
 			Attempts:  result.Attempts,
 			Successes: result.Successes,
-			Score:     result.Score,
+			Score:     checker.Score(result.Latency, result.Jitter, float64(result.Attempts-result.Successes)/float64(result.Attempts)*100, cfg.LatencyWeight, cfg.JitterWeight, cfg.LossWeight),
 		}
 		if result.Error != "" {
 			next.Err = fmt.Errorf("%s", result.Error)
 			next.LastErr = next.Err
+		}
+		if math.IsNaN(next.Score) || math.IsInf(next.Score, 0) {
+			continue
+		}
+		next.FinishedAt = result.ObservedAt
+		if next.FinishedAt.IsZero() {
+			next.FinishedAt = observedAt
 		}
 		out = append(out, next)
 	}
@@ -899,7 +926,26 @@ func checkerResultsFromAgent(results []agent.Result) []checker.Result {
 	return out
 }
 
-func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile, region string, rec config.RegionRecord, results []checker.Result, sc *switchController, now time.Time) web.RegionStatus {
+func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile, region string, rec config.RegionRecord, results []checker.Result, sc *switchController, now time.Time, localProbe ...bool) web.RegionStatus {
+	cf := regionCloudflareClient(cfg, rec)
+	if len(localProbe) > 0 && localProbe[0] {
+		var current string
+		var err error
+		if rec.RecordID != "" {
+			current, err = cf.CurrentIP()
+		} else {
+			current, err = cf.CurrentIPByName(rec.CustomDomain)
+		}
+		if err == nil && checker.IsUsableCandidateIP(current) && findResultByIP(results, current) == nil {
+			measured := checker.PingAll([]string{current}, cfg.PingMode, cfg.PingPort, cfg.PingTimeout, cfg.PingAttempts, cfg.LatencyWeight, cfg.JitterWeight, cfg.LossWeight)
+			applyTimePenalty(cfg, sc, measured, now)
+			results = append(append([]checker.Result(nil), results...), measured...)
+		}
+	}
+	return decideProfileRecord(cfg, profile, region, rec, results, sc, now, cf)
+}
+
+func decideProfileRecord(cfg *config.Config, profile config.AirportProfile, region string, rec config.RegionRecord, results []checker.Result, sc *switchController, now time.Time, cf dnsRecordClient) web.RegionStatus {
 	best := bestHealthyResult(results, cfg)
 	status := web.RegionStatus{
 		Region: region, Label: rec.Label, CustomDomain: rec.CustomDomain,
@@ -918,14 +964,20 @@ func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile,
 		status.Score = best.Score
 	}
 
-	cf := regionCloudflareClient(cfg, rec)
 	currentIP := ""
 	current := (*checker.Result)(nil)
 	recordMissing := false
 	if rec.RecordID != "" {
 		var err error
 		currentIP, err = cf.CurrentIP()
+		if recordNotFound(err) && rec.CustomDomain != "" {
+			// Record IDs change after deletion/recreation. Resolve the configured
+			// name instead of remaining stuck on the deleted ID forever.
+			rec.RecordID = ""
+			return decideProfileRecord(cfg, profile, region, rec, results, sc, now, cf)
+		}
 		if err != nil {
+			sc.resetRoute(profile.ID + "|" + region)
 			if best == nil && recordNotFound(err) {
 				log.Printf("[update] [%s/%s] A record %s is already absent and no healthy candidate is available", profile.ID, region, recordTargetLabel(rec))
 				status.Status = "deleted"
@@ -942,7 +994,8 @@ func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile,
 		if err != nil {
 			if best == nil && recordNotFound(err) {
 				log.Printf("[update] [%s/%s] A record %s is already absent and no healthy candidate is available", profile.ID, region, rec.CustomDomain)
-			} else if best == nil {
+			} else if !recordNotFound(err) {
+				sc.resetRoute(profile.ID + "|" + region)
 				log.Printf("[error] [%s/%s] read current Cloudflare record failed: %v", profile.ID, region, err)
 				status.Status = "read_failed"
 				return status
@@ -959,12 +1012,27 @@ func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile,
 		return status
 	}
 	status.CurrentIP = currentIP
+	status.Latency = resultLatencyMs(current)
 	routeKey := profile.ID + "|" + region
 
 	if best == nil {
 		sc.resetRoute(routeKey)
 		log.Printf("[error] [%s/%s] no healthy candidate for %s", profile.ID, region, recordTargetLabel(rec))
-		if len(results) > 0 || (currentIP != "" && !checker.IsUsableCandidateIP(currentIP)) {
+		if !allProbesFailed(results) {
+			sc.route(routeKey).failures = failureObservation{}
+			return status
+		}
+		confirmed := sc.route(routeKey).failures.confirm(results, cfg.FailureConfirmCycles)
+		log.Printf("[error] [%s/%s] candidate outage: %d/%d independent failed rounds; retaining record until confirmed", profile.ID, region, sc.route(routeKey).failures.count, failureConfirmationCount(cfg.FailureConfirmCycles))
+		if sc.shouldSendRouteAlert(routeKey, now) {
+			alertCfg := *cfg
+			alertCfg.CustomDomain = recordTargetLabel(rec)
+			sendFallbackAlert(&alertCfg, currentIP, nil, results, "candidate outage; waiting for consecutive failure confirmation", false)
+		}
+		if !confirmed {
+			return status
+		}
+		if allProbesFailed(results) || (currentIP != "" && !checker.IsUsableCandidateIP(currentIP)) {
 			if currentIP != "" && !checker.IsUsableCandidateIP(currentIP) {
 				log.Printf("[update] [%s/%s] deleting %s because current record points to non-public/reserved IP %s", profile.ID, region, recordTargetLabel(rec), currentIP)
 			} else {
@@ -1008,7 +1076,7 @@ func runProfileRecordDecision(cfg *config.Config, profile config.AirportProfile,
 		return status
 	}
 
-	if currentIP != "" && !shouldReplaceCurrent(current, best, cfg) {
+	if checker.IsUsableCandidateIP(currentIP) && !shouldReplaceCurrent(current, best, cfg) {
 		sc.resetRoute(routeKey)
 		status.Status = "keeping"
 		if current != nil && current.Err == nil {
@@ -1188,6 +1256,7 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 	if err != nil {
 		log.Printf("[error] dns resolve failed: %v", err)
 		sc.reset()
+		sc.failures = failureObservation{}
 		return nil
 	}
 	log.Printf("[check] discovered %d unique IP(s): %v", len(ips), ips)
@@ -1208,12 +1277,16 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 		mode = "icmp"
 	}
 	if mode == "icmp" {
-		log.Printf("[check] pinging %d IP(s) via ICMP ...", len(ips))
+		log.Printf("[check] checking port %d and pinging %d IP(s) via ICMP ...", cfg.PingPort, len(ips))
 	} else {
 		log.Printf("[check] pinging %d IP(s) on port %d ...", len(ips), cfg.PingPort)
 	}
+	probeIPs := append([]string(nil), ips...)
+	if current, err := cf.CurrentIP(); err == nil {
+		probeIPs = includeCurrentProbeIP(probeIPs, current)
+	}
 	results := checker.PingAll(
-		ips,
+		probeIPs,
 		mode,
 		cfg.PingPort,
 		cfg.PingTimeout,
@@ -1251,6 +1324,10 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 		ws.AddSamples(samples)
 	}
 
+	return decideLegacyRoute(cfg, cf, sc, ips, results)
+}
+
+func decideLegacyRoute(cfg *config.Config, cf dnsRecordClient, sc *switchController, ips []string, results []checker.Result) *cycleOutcome {
 	// 3. Find the best (skip suspiciously low latencies below threshold)
 	var best *checker.Result
 	for i := range results {
@@ -1271,15 +1348,20 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 			r.LossRate,
 			r.Score,
 		)
-		if best == nil {
+		if best == nil || r.Score < best.Score {
 			best = r
 		}
 	}
 
+	currentIP, readErr := cf.CurrentIP()
+	if recordNotFound(readErr) && cfg.CustomDomain != "" {
+		cf = namedDNSRecordClient{dnsRecordClient: cf, name: cfg.CustomDomain}
+		currentIP, readErr = cf.CurrentIP()
+	}
 	if best == nil {
 		sc.reset()
 		log.Printf("[error] all %d IP(s) failed to respond", len(ips))
-		currentIP, err := cf.CurrentIP()
+		err := readErr
 		if err != nil {
 			log.Printf("[error] read current Cloudflare record failed: %v", err)
 			if sc.shouldSendAlert(time.Now()) {
@@ -1287,9 +1369,22 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 			}
 			return &cycleOutcome{}
 		}
+		if !allProbesFailed(results) {
+			sc.failures = failureObservation{}
+			log.Printf("[check] no eligible candidate, but probes did not all fail; keeping current record")
+			return &cycleOutcome{ActiveIP: currentIP, ActiveResult: findResultByIP(results, currentIP)}
+		}
+		confirmed := sc.failures.confirm(results, cfg.FailureConfirmCycles)
+		if !confirmed {
+			log.Printf("[error] candidate outage: %d/%d independent failed rounds; keeping current record", sc.failures.count, failureConfirmationCount(cfg.FailureConfirmCycles))
+			if sc.shouldSendAlert(time.Now()) {
+				sendFallbackAlert(cfg, currentIP, ips, results, "candidate outage; waiting for consecutive failure confirmation", false)
+			}
+			return &cycleOutcome{ActiveIP: currentIP, ActiveResult: findResultByIP(results, currentIP)}
+		}
 		usingFallback := false
 		if cfg.FallbackBaselineIP != "" {
-			usingFallback = true
+			usingFallback = currentIP == cfg.FallbackBaselineIP
 			if currentIP == cfg.FallbackBaselineIP {
 				log.Printf("[fallback] no healthy candidates, baseline %s is already active", cfg.FallbackBaselineIP)
 			} else {
@@ -1298,6 +1393,7 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 					log.Printf("[error] fallback baseline update failed: %v", err)
 				} else {
 					currentIP = cfg.FallbackBaselineIP
+					usingFallback = true
 					log.Printf("[fallback] baseline route applied")
 				}
 			}
@@ -1328,8 +1424,17 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 
 	log.Printf("[check] best candidate: %s (%s)", best.IP, describeResult(best))
 
-	currentIP, err := cf.CurrentIP()
+	if recordNotFound(readErr) && cfg.CustomDomain != "" {
+		if err := cf.UpdateRecordByName(cfg.CustomDomain, best.IP); err != nil {
+			log.Printf("[error] restore missing record failed: %v", err)
+			return &cycleOutcome{Best: best}
+		}
+		sc.reset()
+		return &cycleOutcome{Best: best, ActiveIP: best.IP, ActiveResult: best}
+	}
+	err := readErr
 	if err != nil {
+		sc.reset()
 		log.Printf("[error] read current Cloudflare record failed: %v", err)
 		return &cycleOutcome{Best: best}
 	}
@@ -1345,7 +1450,7 @@ func runOnce(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, sc *swit
 		}
 	}
 
-	if !shouldReplaceCurrent(current, best, cfg) {
+	if checker.IsUsableCandidateIP(currentIP) && !shouldReplaceCurrent(current, best, cfg) {
 		sc.reset()
 		log.Printf("[update] keeping %s; candidate %s does not beat current enough (need %.0f%%, current %s, candidate %s)",
 			currentIP,

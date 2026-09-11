@@ -42,6 +42,7 @@ func (c *switchController) resetProfileCandidates(profileID string) {
 	for key := range c.routes {
 		if strings.HasPrefix(key, profileID+"|") {
 			c.resetRoute(key)
+			c.route(key).failures = failureObservation{}
 		}
 	}
 }
@@ -51,13 +52,14 @@ func (c *switchController) resetProfileCandidates(profileID string) {
 func (c *switchController) resetUnobservedRoutes(profileID string, statuses []web.RegionStatus) {
 	observed := make(map[string]bool, len(statuses))
 	for _, status := range statuses {
-		if status.Status != "read_failed" {
+		if status.Status != "read_failed" && status.CandidateCount > 0 {
 			observed[profileID+"|"+status.Region] = true
 		}
 	}
 	for key := range c.routes {
 		if strings.HasPrefix(key, profileID+"|") && !observed[key] {
 			c.resetRoute(key)
+			c.route(key).failures = failureObservation{}
 		}
 	}
 }
