@@ -179,7 +179,8 @@ WantedBy=multi-user.target
 UNIT
 
   systemctl daemon-reload
-  systemctl enable --now "$SERVICE_NAME"
+  systemctl enable "$SERVICE_NAME"
+  systemctl restart "$SERVICE_NAME"
   sleep 2
   systemctl --no-pager --full status "$SERVICE_NAME" || true
 elif [ "$os" = "darwin" ]; then

@@ -40,7 +40,7 @@ func TestMissingAgentRouteCannotCarryStabilityAcrossGap(t *testing.T) {
 		sc.route(key).candidateIP = "1.1.1.1"
 		sc.route(key).candidateSince = time.Now().Add(-time.Hour)
 	}
-	sc.resetUnobservedRoutes("airport", []web.RegionStatus{{Region: "carrier-mobile", Status: "stabilizing"}})
+	sc.resetUnobservedRoutes("airport", []web.RegionStatus{{Region: "carrier-mobile", Status: "stabilizing", CandidateCount: 1}})
 	if sc.route("airport|carrier-unicom").candidateIP != "" {
 		t.Fatal("missing agent route retained its previous observation")
 	}

@@ -8,7 +8,7 @@
 
 - 多 DNS 解析目标域名，尽量发现更多真实候选 IP
 - 可按运营商策略选择解析 DNS 池，`auto` 会根据探测源自动推断联通/电信/移动
-- 支持 `ICMP` / `TCP` 两种探测方式
+- 支持 `ICMP` / `TCP` 两种探测方式；每轮都会先检查配置的服务端口是否可用
 - 每轮可多次探测同一 IP，计算平均延迟、抖动、丢包率与综合分
 - 不是看到更低延迟就立即切换，而是带有 `阈值 + 稳定时长` 的防抖策略
 - 支持按本地时间窗口对指定 IDC / ISP 动态加权，避免深夜抖动节点误切换
@@ -158,7 +158,7 @@ dns_servers:
 
 主控里的 `agents` 是预期在线的 Agent 清单。Web 仪表盘会显示本地主控节点以及这些 Agent 的在线、过期、离线状态；没有写进清单但实际发来上报的临时 Agent 也会显示出来。后台管理里的 `Agent 探针` 页可以维护通信 Token、离线判定 TTL，以及联通/电信/移动子机清单。`agent.report_ttl_seconds` 控制远端 Agent 多久没上报后从在线变为过期。
 
-也可以像 Nezha 探针一样使用一键安装：在后台 `Agent 探针` 页先保存通信 Token 和主控地址，然后复制页面里的安装命令到电信/移动机器上用 root 执行。安装命令会从 GitHub 拉取 `scripts/install-agent.sh`，脚本默认从主控地址下载 `dns-latency-router-agent`，失败时再兜底 GitHub Release，随后写入 `agent.yaml`、创建系统服务并自动连接主控；Linux 使用 systemd，macOS 使用 launchd。首次上报后会自动出现在主控列表里，再在后台修改地区/探测源和运营商即可。跨网络部署时建议把主控地址填成 ZeroTier / 内网地址。
+也可以像 Nezha 探针一样使用一键安装：在后台 `Agent 探针` 页先保存通信 Token 和主控地址，然后复制页面里的安装命令到电信/移动机器上用 root 执行。安装命令会从主控的 `/api/agent/install.sh` 获取脚本，脚本默认从主控地址下载 `dns-latency-router-agent`，失败时再兜底 GitHub Release；随后写入 `agent.yaml`、创建或重启系统服务并自动连接主控。Linux 使用 systemd，macOS 使用 launchd。主控不可访问 GitHub 时仍可完成安装。首次上报后会自动出现在主控列表里，再在后台修改地区/探测源和运营商即可。跨网络部署时建议把主控地址填成 ZeroTier / 内网地址。
 
 默认不是“最低 Ping 获胜”，而是综合以下指标：
 
@@ -348,6 +348,7 @@ selection_jitter_weight: 0.35
 selection_loss_weight: 4.0
 switch_improvement_percent: 15
 switch_stable_seconds: 120
+failure_confirm_cycles: 3
 time_penalty_start_hour: 0
 time_penalty_end_hour: 5
 time_penalty_score: 60
@@ -441,7 +442,7 @@ airport_profiles:
 | `check_interval` | 两轮检测之间的间隔，单位秒 |
 | `proxy_url` | Cloudflare API 请求使用的代理，可为 HTTP 或 SOCKS5 |
 | `ping_mode` | `icmp` 或 `tcp` |
-| `ping_port` | `tcp` 模式下探测的目标端口 |
+| `ping_port` | 每轮检查的服务端口；TCP 模式同时用它测量延迟，ICMP 模式也会先做一次 TCP 连通性检查 |
 | `ping_timeout_seconds` | 单次探测超时 |
 | `ping_attempts` | 每轮对每个 IP 的探测次数 |
 | `ping_min_threshold_ms` | 过低延迟过滤阈值，避免本地回环等假结果 |
@@ -450,6 +451,7 @@ airport_profiles:
 | `selection_loss_weight` | 丢包权重 |
 | `switch_improvement_percent` | 新 IP 至少比当前 IP 好多少百分比才考虑切换 |
 | `switch_stable_seconds` | 候选节点需稳定多久才真正切换 |
+| `failure_confirm_cycles` | 全候选失败连续确认轮数，默认 3；同一份 Agent 报告不重复累计 |
 | `time_penalty_start_hour` | 时间窗口惩罚的开始小时，按探测机本地时间 |
 | `time_penalty_end_hour` | 时间窗口惩罚的结束小时，支持跨天 |
 | `time_penalty_score` | 命中时间窗口和目标厂商后追加的惩罚分 |
@@ -619,3 +621,14 @@ proxies:
 - 你想长期观察不同出口 IP 的本地表现差异
 - 你需要一个适合盯盘的简洁 Web 控制台
 - 你希望切换逻辑更保守，避免“今天这个快一点、下一轮又换回去”
+
+
+### 故障确认与记录恢复
+
+候选 IP 全部探测失败时，先保留现有 A 记录并告警；连续 `failure_confirm_cycles` 轮独立探测失败后才执行原有的兜底/删除逻辑。默认 3 轮，旧配置不填写时自动使用该值。此参数通过 YAML 配置；恢复成功或中断观测会清除失败计数。未设置 `alert_webhook_url` 时仅记录日志。
+
+单入口模式确认故障后优先使用已配置的 `fallback_baseline_ip`，未配置则删除；多机场/地区记录沿用确认后删除的策略，不把一个全局兜底 IP 自动套用于所有地区。兜底地址必须是可用公网 IPv4。
+
+低于延迟筛选阈值的成功响应不算探测失败。在用 IP 偶尔未出现在 DNS 结果中时，本地模式会补测该 IP；远端模式把在用 IP 带入 Agent 后续任务，测量就绪前保留现有记录。不能仅凭候选 IP 健康就认定达到改进阈值。Cloudflare 权限、限流及临时服务错误不会触发创建；已删除记录可按配置域名恢复，不必继续使用失效的 Record ID。
+
+Agent 上报会校验配置中的机场归属、候选 IP 集合、探测次数和统计数值。控制端按照当前权重重新计算路由分数，避免使用上报时的旧权重。报告使用服务端接收时间判断有效期。

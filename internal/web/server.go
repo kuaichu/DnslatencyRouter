@@ -20,15 +20,24 @@ import (
 	"dns-latency-router/internal/agent"
 	"dns-latency-router/internal/checker"
 	"dns-latency-router/internal/config"
+	"dns-latency-router/scripts"
 )
 
 //go:embed dashboard.html assets/flags/*
 var templateFS embed.FS
 
-const agentInstallerURL = "https://raw.githubusercontent.com/kuaichu/DnslatencyRouter/main/scripts/install-agent.sh"
+const agentInstallerPath = "/api/agent/install.sh"
 
 const controllerCandidateCacheTTL = 2 * time.Minute
 const controllerCandidateEmptyCacheTTL = 30 * time.Second
+
+const (
+	maxAgentReportBodyBytes       = 4 << 20
+	maxAgentIDLength              = 128
+	maxAgentProfiles              = 256
+	maxAgentResolvedIPsPerProfile = 4096
+	maxAgentResultsPerProfile     = 4096
+)
 
 // Status holds the current state exposed via API/SSE.
 type Status struct {
@@ -59,6 +68,7 @@ type Status struct {
 type AgentStatus struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
+	Version      string    `json:"version,omitempty"`
 	Carrier      string    `json:"carrier"`
 	CarrierLabel string    `json:"carrierLabel"`
 	ProbeSource  string    `json:"probeSource"`
@@ -439,6 +449,20 @@ func (s *Server) candidateIPsForProfile(profileID string) []string {
 		seen[ip] = struct{}{}
 	}
 
+	// Keep the in-use route measurable even if a DNS response temporarily
+	// omits it. Remote agents must measure their own path, not the controller's.
+	status := s.GetStatus()
+	if len(status.Profiles) == 0 {
+		add(status.CurrentIP)
+	}
+	for _, profile := range status.Profiles {
+		if profileID != "" && profile.ID != profileID {
+			continue
+		}
+		for _, region := range profile.Regions {
+			add(region.CurrentIP)
+		}
+	}
 	s.activeIPsMu.RLock()
 	if profileID != "" {
 		for ip := range s.activeIPsByProfile[profileID] {
@@ -1122,7 +1146,9 @@ func (s *Server) handleAPIAgentInstallScript(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	http.Redirect(w, r, agentInstallerURL, http.StatusTemporaryRedirect)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(scripts.AgentInstaller)
 }
 
 func (s *Server) handleAPIAgentInstallCommand(w http.ResponseWriter, r *http.Request) {
@@ -1145,7 +1171,7 @@ func (s *Server) handleAPIAgentInstallCommand(w http.ResponseWriter, r *http.Req
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, map[string]interface{}{
 		"ok":             true,
-		"script_url":     agentInstallerURL,
+		"script_url":     controllerURL + agentInstallerPath,
 		"controller_url": controllerURL,
 		"command":        buildAgentInstallCommand(controllerURL, token, cfg.CheckIntervalSec),
 	})
@@ -1291,25 +1317,95 @@ func normalizeAgentReportWithAssignments(report agent.Report, assignments map[st
 	return report
 }
 
-func sanitizeAgentReportCandidates(report agent.Report) agent.Report {
+func validateAgentReport(report agent.Report, cfg *config.Config) (agent.Report, error) {
+	if cfg == nil {
+		return report, fmt.Errorf("server config is unavailable")
+	}
+	report.AgentID = strings.TrimSpace(report.AgentID)
+	if report.AgentID == "" {
+		return report, fmt.Errorf("agentId is required")
+	}
+	if len(report.AgentID) > maxAgentIDLength {
+		return report, fmt.Errorf("agentId is too long")
+	}
+	if strings.EqualFold(report.AgentID, "controller") {
+		return report, fmt.Errorf("agentId is reserved")
+	}
+	if len(report.Profiles) > maxAgentProfiles {
+		return report, fmt.Errorf("too many profiles")
+	}
+
+	allowed := make(map[string]string)
+	profiles := cfg.AirportProfiles
+	if len(profiles) == 0 && cfg.TargetDomain != "" {
+		profiles = []config.AirportProfile{cfg.LegacyProfile()}
+	}
+	for _, profile := range profiles {
+		id := strings.TrimSpace(profile.ID)
+		if id != "" {
+			allowed[strings.ToLower(id)] = id
+		}
+	}
+	seenProfiles := make(map[string]struct{}, len(report.Profiles))
 	for profileIdx := range report.Profiles {
 		profile := &report.Profiles[profileIdx]
-		profile.ResolvedIPs = checker.FilterUsableCandidateIPs(profile.ResolvedIPs)
+		key := strings.ToLower(strings.TrimSpace(profile.ProfileID))
+		canonicalID, ok := allowed[key]
+		if !ok {
+			return report, fmt.Errorf("profileId %q is not configured", profile.ProfileID)
+		}
+		if _, duplicate := seenProfiles[key]; duplicate {
+			return report, fmt.Errorf("profileId %q is duplicated", profile.ProfileID)
+		}
+		seenProfiles[key] = struct{}{}
+		profile.ProfileID = canonicalID
+		if len(profile.ResolvedIPs) > maxAgentResolvedIPsPerProfile {
+			return report, fmt.Errorf("too many resolved IPs for profile %q", canonicalID)
+		}
+		resolved := make(map[string]struct{}, len(profile.ResolvedIPs))
+		normalizedResolved := make([]string, 0, len(profile.ResolvedIPs))
+		for _, rawIP := range profile.ResolvedIPs {
+			ip, ok := checker.NormalizeCandidateIP(rawIP)
+			if !ok {
+				return report, fmt.Errorf("resolved IP %q is unusable", rawIP)
+			}
+			if _, duplicate := resolved[ip]; duplicate {
+				return report, fmt.Errorf("resolved IP %q is duplicated", ip)
+			}
+			resolved[ip] = struct{}{}
+			normalizedResolved = append(normalizedResolved, ip)
+		}
+		profile.ResolvedIPs = normalizedResolved
+		if len(profile.Results) > maxAgentResultsPerProfile {
+			return report, fmt.Errorf("too many results for profile %q", canonicalID)
+		}
+		seenResults := make(map[string]struct{}, len(profile.Results))
 		results := profile.Results[:0]
 		for _, result := range profile.Results {
-			normalized, ok := checker.NormalizeCandidateIP(result.IP)
+			ip, ok := checker.NormalizeCandidateIP(result.IP)
 			if !ok {
-				continue
+				return report, fmt.Errorf("result contains unusable IP")
 			}
-			result.IP = normalized
+			if _, ok := resolved[ip]; !ok {
+				return report, fmt.Errorf("result IP %q is not resolved for profile %q", ip, canonicalID)
+			}
+			if _, duplicate := seenResults[ip]; duplicate {
+				return report, fmt.Errorf("result IP %q is duplicated", ip)
+			}
+			if err := agent.ValidateResult(result); err != nil {
+				return report, fmt.Errorf("result %q: %w", ip, err)
+			}
+			result.Score = checker.Score(result.Latency, result.Jitter, result.LossRate, cfg.LatencyWeight, cfg.JitterWeight, cfg.LossWeight)
+			if err := agent.ValidateResult(result); err != nil {
+				return report, fmt.Errorf("recomputed result %q: %w", ip, err)
+			}
+			result.IP = ip
+			seenResults[ip] = struct{}{}
 			results = append(results, result)
 		}
 		profile.Results = results
-		if len(profile.ResolvedIPs) == 0 && len(profile.Results) == 0 && profile.Error == "" {
-			profile.Error = "no usable public IPv4 candidates after filtering reserved/fake-ip results"
-		}
 	}
-	return report
+	return report, nil
 }
 
 func normalizeIPSampleWithAssignments(sample IPSample, assignments map[string]agentAssignment) IPSample {
@@ -1346,7 +1442,7 @@ func buildAgentInstallCommand(controllerURL, token string, interval int) string 
 	}
 	parts := []string{
 		"curl -fsSL",
-		shellQuote(agentInstallerURL),
+		shellQuote(strings.TrimRight(controllerURL, "/") + agentInstallerPath),
 		"| bash -s --",
 		"--controller",
 		shellQuote(controllerURL),
@@ -1481,17 +1577,36 @@ func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	cfg, err := config.Load(s.cfgPath)
+	if err != nil {
+		http.Error(w, "load config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAgentReportBodyBytes)
 	var report agent.Report
-	if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
-		writeJSON(w, map[string]string{"error": "invalid JSON: " + err.Error()})
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&report); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	report.AgentID = strings.TrimSpace(report.AgentID)
-	if report.AgentID == "" {
-		writeJSON(w, map[string]string{"error": "agentId is required"})
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			http.Error(w, "invalid JSON: multiple values", http.StatusBadRequest)
+		} else {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
-	report = sanitizeAgentReportCandidates(normalizeAgentReportWithAssignments(report, s.agentAssignments()))
+	if headerID := strings.TrimSpace(r.Header.Get("X-Agent-ID")); headerID != "" && !strings.EqualFold(headerID, strings.TrimSpace(report.AgentID)) {
+		http.Error(w, "agentId does not match X-Agent-ID", http.StatusBadRequest)
+		return
+	}
+	report = normalizeAgentReportWithAssignments(report, s.agentAssignments())
+	if report, err = validateAgentReport(report, cfg); err != nil {
+		http.Error(w, "invalid agent report: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 	// Never trust a client-supplied receipt timestamp.
 	report.ReceivedAt = time.Now()
 	if report.FinishedAt.IsZero() {
@@ -1531,6 +1646,7 @@ func (s *Server) handleAPIAgentReports(w http.ResponseWriter, r *http.Request) {
 
 func agentSamplesFromReport(report agent.Report) []IPSample {
 	samples := make([]IPSample, 0)
+	now := time.Now()
 	carrier := concreteAgentCarrier(report.Carrier)
 	carrierLabel := agentCarrierLabel(carrier)
 	region := "agent-unknown"
@@ -1548,6 +1664,18 @@ func agentSamplesFromReport(report agent.Report) []IPSample {
 			}
 			if sampleTime.IsZero() {
 				sampleTime = report.FinishedAt
+			}
+			if sampleTime.IsZero() {
+				sampleTime = report.ReceivedAt
+			}
+			if sampleTime.IsZero() {
+				sampleTime = now
+			}
+			if sampleTime.After(now) {
+				sampleTime = report.ReceivedAt
+				if sampleTime.IsZero() || sampleTime.After(now) {
+					sampleTime = now
+				}
 			}
 			sample := IPSample{
 				Time:         sampleTime,
@@ -1653,6 +1781,7 @@ func (s *Server) AgentStatuses(ttl time.Duration) []AgentStatus {
 		}
 		status := statusesByID[id]
 		status.ID = id
+		status.Version = strings.TrimSpace(report.Version)
 		if strings.TrimSpace(status.Name) == "" {
 			status.Name = strings.TrimSpace(report.AgentName)
 		}
