@@ -16,7 +16,13 @@ import (
 	"dns-latency-router/internal/config"
 )
 
-func Run(cfg *config.Config) {
+func Run(cfg *config.Config, baseDirs ...string) {
+	baseDir := "."
+	if len(baseDirs) > 0 {
+		baseDir = baseDirs[0]
+	}
+	stopMTR := startMTR(cfg, baseDir)
+	defer stopMTR()
 	client := &http.Client{Timeout: 30 * time.Second}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)

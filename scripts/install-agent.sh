@@ -143,6 +143,34 @@ fi
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$tmp" "$INSTALL_DIR/$BIN_NAME"
 
+# Optional, pinned MTR runtime. Failure must not prevent normal Agent probes.
+nexttrace_sha=""
+case "$platform" in
+  linux-amd64) nexttrace_sha="aa75440fcdee46c16d941f48f9dabee1eb4c35bea6b739b0960fcf8307088c29" ;;
+  linux-arm64) nexttrace_sha="4fbf436e2d4737e4a491e71ce3cd140a7a268d43ec94fb9ac9497aec7eda080e" ;;
+  darwin-arm64) nexttrace_sha="32d6ea209beedab088ba4e954d7e28d6bf2561991baf92633a684d1e37c2a0d1" ;;
+esac
+if [ -n "$nexttrace_sha" ]; then
+  trace_dir="$INSTALL_DIR/tools/nexttrace"
+  mkdir -p "$trace_dir"
+  if download "$CONTROLLER_URL/api/agent/nexttrace/$platform" "$tmp"; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual_sha="$(sha256sum "$tmp" | awk '{print $1}')"
+    else
+      actual_sha="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+    fi
+    if [ "$actual_sha" = "$nexttrace_sha" ]; then
+      install -m 0755 "$tmp" "$trace_dir/nexttrace_${platform//-/_}"
+      download "$CONTROLLER_URL/api/agent/nexttrace/LICENSE" "$trace_dir/LICENSE" || true
+      download "$CONTROLLER_URL/api/agent/nexttrace/source" "$trace_dir/source-v1.7.3.tar.gz" || true
+    else
+      echo "NextTrace checksum mismatch; MTR runtime not installed" >&2
+    fi
+  else
+    echo "NextTrace not available on controller; normal Agent probes remain enabled" >&2
+  fi
+fi
+
 {
   echo "node_role: agent"
   echo "agent:"

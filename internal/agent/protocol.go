@@ -7,7 +7,7 @@ import (
 )
 
 // Version identifies the Agent runtime shown by the controller.
-const Version = "2026.09.11"
+const Version = "2026.09.14"
 
 type ProfileJob struct {
 	ID            string   `json:"id"`

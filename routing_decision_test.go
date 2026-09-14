@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -130,5 +131,190 @@ func TestCurrentRouteAddedToLocalProbeSetOnlyOnce(t *testing.T) {
 	ips = includeCurrentProbeIP(ips, "127.0.0.1")
 	if len(ips) != 2 || ips[1] != "8.8.8.8" {
 		t.Fatalf("unexpected probe set: %v", ips)
+	}
+}
+
+func TestFailedCurrentImmediatelySwitchesToHealthyCandidate(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		client := &fakeDNSRecords{ip: "47.129.125.84"}
+		cfg := &config.Config{SwitchImprovement: 15, SwitchStableSec: 600}
+		now := time.Now()
+		results := []checker.Result{
+			{IP: "13.214.221.186", Latency: 65 * time.Millisecond, Score: 65, Attempts: 4, Successes: 4, FinishedAt: now},
+			{IP: client.ip, Err: errors.New("port 12001 unavailable"), LossRate: 100, Attempts: 1, FinishedAt: now},
+		}
+		if legacy {
+			decideLegacyRoute(cfg, client, &switchController{}, nil, results)
+		} else {
+			got := decideProfileRecord(cfg, config.AirportProfile{ID: "sntp"}, "carrier-unicom-sg", config.RegionRecord{CustomDomain: "sg.example"}, results, &switchController{}, now, client)
+			if got.Status != "switched" {
+				t.Fatalf("dead current waited for stability: %s", got.Status)
+			}
+		}
+		if client.updates != 1 || client.ip != results[0].IP {
+			t.Fatalf("legacy=%t did not fail over immediately", legacy)
+		}
+	}
+}
+
+func TestSwitchRequiresFreshCandidateMeasurement(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			cfg := &config.Config{SwitchImprovement: 15, SwitchStableSec: 60}
+			client := &fakeDNSRecords{ip: "8.8.8.8"}
+			sc := &switchController{}
+			now := time.Now()
+			results := []checker.Result{
+				{IP: client.ip, Latency: 100 * time.Millisecond, Score: 100, FinishedAt: now},
+				{IP: "1.1.1.1", Latency: 50 * time.Millisecond, Score: 50, FinishedAt: now},
+			}
+			decide := func(at time.Time) {
+				if legacy {
+					decideLegacyRoute(cfg, client, sc, nil, results)
+				} else {
+					decideProfileRecord(cfg, config.AirportProfile{ID: "airport"}, "entry", config.RegionRecord{CustomDomain: "route.example"}, results, sc, at, client)
+				}
+			}
+			decide(now)
+			// Advance controller time without waiting, while leaving the actual
+			// candidate measurement unchanged. Another IP's sample must not count.
+			if legacy {
+				sc.candidateSince = now.Add(-time.Hour)
+			}
+			results[0].FinishedAt = now.Add(61 * time.Second)
+			decide(now.Add(61 * time.Second))
+			if client.updates != 0 {
+				t.Fatal("reusing a candidate measurement established stability")
+			}
+			results[1].FinishedAt = now.Add(62 * time.Second)
+			decide(now.Add(62 * time.Second))
+			if client.updates != 1 || client.ip != "1.1.1.1" {
+				t.Fatal("a fresh confirming measurement did not permit switch")
+			}
+		})
+	}
+}
+
+func TestOutageRequiresCurrentIPFailureInEachRound(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			client := &fakeDNSRecords{ip: "8.8.8.8"}
+			sc := &switchController{}
+			cfg := &config.Config{FailureConfirmCycles: 3}
+			now := time.Now()
+			decide := func(round int, measureCurrent bool) {
+				stamp := now.Add(time.Duration(round) * time.Minute)
+				results := []checker.Result{{IP: "1.1.1.1", Err: errors.New("timeout"), FinishedAt: stamp}}
+				if measureCurrent {
+					results = append(results, checker.Result{IP: "8.8.8.8", Err: errors.New("timeout"), FinishedAt: stamp})
+				}
+				if legacy {
+					decideLegacyRoute(cfg, client, sc, nil, results)
+				} else {
+					decideProfileRecord(cfg, config.AirportProfile{ID: "airport"}, "entry", config.RegionRecord{CustomDomain: "route.example"}, results, sc, stamp, client)
+				}
+			}
+			decide(0, true)
+			decide(1, true)
+			for i := 2; i < 5; i++ {
+				decide(i, false)
+			}
+			decide(5, true)
+			decide(6, true)
+			if client.deletes != 0 {
+				t.Fatal("unmeasured current route was deleted or missing observations counted toward confirmation")
+			}
+			decide(7, true)
+			if client.deletes != 1 {
+				t.Fatal("three complete failed rounds did not confirm outage")
+			}
+		})
+	}
+}
+
+func TestHealthyCurrentStillRequiresBestCandidateStability(t *testing.T) {
+	cfg := &config.Config{SwitchImprovement: 15, SwitchStableSec: 60}
+	client := &fakeDNSRecords{ip: "8.8.8.8"}
+	sc := &switchController{}
+	now := time.Now()
+	results := []checker.Result{
+		{IP: client.ip, Latency: 100 * time.Millisecond, Score: 100, FinishedAt: now},
+		{IP: "1.1.1.1", Latency: 50 * time.Millisecond, Score: 50, FinishedAt: now},
+		{IP: "9.9.9.9", Latency: 51 * time.Millisecond, Score: 51, FinishedAt: now},
+	}
+	decideProfileRecord(cfg, config.AirportProfile{ID: "airport"}, "entry", config.RegionRecord{CustomDomain: "route.example"}, results, sc, now, client)
+	for i := range results {
+		results[i].FinishedAt = now.Add(5 * time.Minute)
+	}
+	results[1].Score, results[2].Score = 51, 50
+	got := decideProfileRecord(cfg, config.AirportProfile{ID: "airport"}, "entry", config.RegionRecord{CustomDomain: "route.example"}, results, sc, now.Add(5*time.Minute), client)
+	if client.updates != 0 || got.Status != "stabilizing" || sc.route("airport|entry").candidateIP != "9.9.9.9" {
+		t.Fatalf("healthy current must retain normal best-candidate observation: %+v", got)
+	}
+}
+
+func TestLegacyReadFailureClearsOutageConfirmation(t *testing.T) {
+	client := &fakeDNSRecords{ip: "8.8.8.8"}
+	sc := &switchController{}
+	cfg := &config.Config{FailureConfirmCycles: 3}
+	now := time.Now()
+	for round := 0; round < 4; round++ {
+		client.readErr = nil
+		if round == 1 {
+			client.readErr = errors.New("temporary API failure")
+		}
+		decideLegacyRoute(cfg, client, sc, nil, []checker.Result{{IP: "8.8.8.8", Err: errors.New("timeout"), FinishedAt: now.Add(time.Duration(round) * time.Minute)}})
+	}
+	if client.deletes != 0 {
+		t.Fatal("interrupted reads counted as consecutive outage")
+	}
+}
+
+func TestCandidateObservationWindow(t *testing.T) {
+	first := time.Now()
+	for _, tc := range []struct {
+		name          string
+		first, latest time.Time
+		seconds       int
+		want          bool
+	}{
+		{"same report", first, first, 60, false},
+		{"new but too early", first, first.Add(time.Second), 60, false},
+		{"window covered", first, first.Add(time.Minute), 60, true},
+		{"missing timestamp", time.Time{}, first, 60, false},
+		{"older report", first, first.Add(-time.Minute), 60, false},
+		{"disabled window", time.Time{}, time.Time{}, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := candidateObservationReady(tc.first, tc.latest, tc.seconds); got != tc.want {
+				t.Fatalf("ready=%t want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTimestampedCandidateCanStartAfterMissingTimestamp(t *testing.T) {
+	cfg := &config.Config{SwitchImprovement: 15, SwitchStableSec: 60}
+	client := &fakeDNSRecords{ip: "8.8.8.8"}
+	sc := &switchController{}
+	now := time.Now()
+	results := []checker.Result{{IP: client.ip, Latency: 100 * time.Millisecond, Score: 100}, {IP: "1.1.1.1", Latency: 50 * time.Millisecond, Score: 50}}
+	decide := func(at time.Time) {
+		decideProfileRecord(cfg, config.AirportProfile{ID: "airport"}, "entry", config.RegionRecord{CustomDomain: "route.example"}, results, sc, at, client)
+	}
+	decide(now)
+	for i := range results {
+		results[i].FinishedAt = now.Add(time.Minute)
+	}
+	decide(now.Add(time.Minute))
+	if client.updates != 0 {
+		t.Fatal("missing timestamp must not count toward stability")
+	}
+	for i := range results {
+		results[i].FinishedAt = now.Add(2 * time.Minute)
+	}
+	decide(now.Add(2 * time.Minute))
+	if client.updates != 1 {
+		t.Fatal("new valid timestamps failed to recover observation window")
 	}
 }

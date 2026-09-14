@@ -1,8 +1,9 @@
 package main
 
 import (
-	"dns-latency-router/internal/checker"
 	"time"
+
+	"dns-latency-router/internal/checker"
 )
 
 type failureObservation struct {
@@ -50,6 +51,25 @@ func allProbesFailed(results []checker.Result) bool {
 		}
 	}
 	return true
+}
+
+// Missing measurements cannot establish an outage of a usable current route.
+// Keep the existing recovery path for absent or non-public DNS records.
+func allRouteProbesFailed(results []checker.Result, currentIP string) bool {
+	if !allProbesFailed(results) {
+		return false
+	}
+	return !checker.IsUsableCandidateIP(currentIP) || findResultByIP(results, currentIP) != nil
+}
+
+// A second evaluation of the same cached report is not another observation.
+// Only the selected candidate's measurement may confirm its stability.
+func candidateObservationReady(first, latest time.Time, stableSeconds int) bool {
+	if stableSeconds <= 0 {
+		return true
+	}
+	return !first.IsZero() && latest.After(first) &&
+		latest.Sub(first) >= time.Duration(stableSeconds)*time.Second
 }
 
 func includeCurrentProbeIP(ips []string, current string) []string {

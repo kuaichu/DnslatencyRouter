@@ -13,7 +13,10 @@ func TestInstallerServedWithoutGitHubRedirect(t *testing.T) {
 	if r.Code != http.StatusOK || r.Header().Get("Location") != "" {
 		t.Fatalf("installer must be served locally: status=%d location=%q", r.Code, r.Header().Get("Location"))
 	}
-	body := strings.ReplaceAll(r.Body.String(), "\r\n", "\n")
+	body := r.Body.String()
+	if strings.Contains(body, "\r") {
+		t.Fatal("served installer must use LF line endings for bash")
+	}
 	if !strings.HasPrefix(body, "#!/usr/bin/env bash\n") || !strings.Contains(body, "CONTROLLER_DOWNLOAD_URL=") {
 		t.Fatal("response is not the complete installer")
 	}

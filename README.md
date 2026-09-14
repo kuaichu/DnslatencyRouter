@@ -1,6 +1,6 @@
 # DNS Latency Router
 
-周期性解析目标域名的全部候选 IP，按延迟、抖动、丢包率综合评分，结合切换阈值与稳定窗口，自动把 Cloudflare DNS A 记录切到更稳的节点。自带一个偏运维控制台风格的 Web 仪表盘。
+周期性解析目标域名的候选 IP，按延迟、抖动、丢包率综合评分，自动维护 Cloudflare DNS A 记录。当前线路健康时通过改进阈值和稳定窗口择优；当前线路被探针确认失败且有健康候选时立即切换。支持多机场、多地区和远端运营商 Agent，自带 Web 仪表盘。
 
 这个项目特别适合代理场景：客户端连接 `custom_domain`，TLS SNI 覆写为 `target_domain`，这样入口域名不变，但底层会持续指向当前更优的出口 IP。
 
@@ -10,14 +10,15 @@
 - 可按运营商策略选择解析 DNS 池，`auto` 会根据探测源自动推断联通/电信/移动
 - 支持 `ICMP` / `TCP` 两种探测方式；每轮都会先检查配置的服务端口是否可用
 - 每轮可多次探测同一 IP，计算平均延迟、抖动、丢包率与综合分
-- 不是看到更低延迟就立即切换，而是带有 `阈值 + 稳定时长` 的防抖策略
+- 健康线路择优使用 `改进阈值 + 稳定时长`，已确认失败的当前线路立即切换到健康候选
 - 支持按本地时间窗口对指定 IDC / ISP 动态加权，避免深夜抖动节点误切换
 - 支持多机场入口：每个机场可配置独立入口域名、缩写、探测源与运营商策略
 - 支持按 IP 归属地拆分地区记录，例如 `ct-sntp-hk.example.net`、`ct-sntp-my.example.net`
 - 支持主控 + Agent 子机模式：电信、联通、移动机器可在各自网络里探测并上报结果
 - Cloudflare API 支持走代理
 - Web 仪表盘支持在线修改主要配置并即时生效
-- Web 仪表盘内置全球 SVG 国旗资源，地区卡片不依赖系统 Emoji 或外部 CDN
+- 优选 IP 支持后台 NextTrace 路由追踪，卡片显示到达状态、终点延迟、回应次数和途经位置
+- 地区、IP 表现和路由追踪卡片使用本地 SVG 国旗，展示 IP 地区与 IDC，不依赖系统 Emoji 或外部 CDN
 - 日志、检测历史、IP 样本会持久化保存最近 30 天
 - 支持 IP 生命周期管理：游离 IP 不会立刻删除，而是降级展示并在窗口期后自动淘汰
 
@@ -35,8 +36,8 @@
                          │     → 计算综合评分           │
                          │                              │
                          │  3. 比较当前记录与候选节点     │
-                         │     → 满足阈值与稳定窗口     │
-                         │     → 再更新 Cloudflare      │
+                         │     → 健康：阈值与稳定窗口   │
+                         │     → 故障：切换健康候选     │
                          │                              │
                          │  4. 写入历史 / 日志 / 样本    │
                          │     → 刷新 Web 仪表盘        │
@@ -93,6 +94,7 @@ Agent 负责：
 - 在本机运营商网络下解析机场入口域名
 - 对解析出的 IP 做 ICMP / TCP 探测
 - 把结果上报给主控
+- 后台执行主控选定 IP 的路由追踪并回传报告
 
 主控配置示例：
 
@@ -173,12 +175,14 @@ dns_servers:
 - 对抖动有一定惩罚
 - 对丢包率更敏感
 
-此外，为了避免频繁来回切换，系统还会启用两层保护：
+当前线路仍健康时，系统使用两层保护来避免频繁切换：
 
 - `switch_improvement_percent`
   - 新 IP 至少比当前 IP 好这么多，才有资格成为候选
 - `switch_stable_seconds`
   - 候选节点必须持续稳定一段时间，才真正调用 Cloudflare API 切换
+
+稳定窗口需要新的候选测量结果跨过设定时长，重复读取同一份 Agent 报告不会推进观察。当前 IP 已实际测量并失败、且存在健康候选时，会立即切换；尚未测量当前 IP 时保留原记录，不能仅凭其他候选失败就认定当前线路故障。
 
 ### 时间窗口权重
 
@@ -213,7 +217,36 @@ dns_servers:
 
 ## Web 仪表盘
 
-浏览器打开 `http://<你的服务器 IP>:19198`。
+浏览器打开 `http://<主控地址>:19198`。页面通过短轮询更新，HTML 和静态资源直接嵌入主控二进制，无需独立前端构建。
+
+### 优选 IP 的一次性路由追踪
+
+「优选 IP · 路由追踪」按当前机场和探针展示已生效 IP 的追踪快照。每张卡片默认显示：
+
+- 目标 IP、国旗、地区与 IDC，例如 `Hong Kong · Google Cloud`，与地区解析卡片使用相同的 IP 地理数据
+- 到达状态、记录跳数、终点平均往返延迟、终点回应次数和快照时间
+- 途经位置，相邻重复位置会合并
+
+展开「逐跳详情」可查看每跳位置、运营商 / ASN、IP、平均延迟和回应次数；连续未回应的跳点会合并显示。原始 NextTrace 输出保存在折叠的「技术详情」内。轮询时保留各卡片的展开状态，地区和 IDC 信息更新后标签也会同步更新。
+
+到达结论来自 NextTrace 的停止原因；终点平均延迟只计算目标 IP 的成功响应，不使用中间节点或 GeoIP API 的延迟。中间跳未回应可能是路由器限制探测响应，不能等同于业务丢包；TCP RST 也能表明到达目标，但不能证明业务端口正常。实际选路仍使用独立的端口检查和健康评分。
+
+只对实际生效的 IP 执行追踪。同一探针、IP 和业务端口在多个地区命中时合并任务；选择不变时复用首次报告，页面刷新、轮询和重启不会重跑。IP / 探针 / 端口变化后创建新任务，切走再切回也会重新追踪。失败或超时会保存错误，不会无限重试；追踪格式升级时可能一次性重建旧报告。
+
+追踪在独立后台队列中串行执行，不阻塞日常探测或 DNS 更新，也不参与评分。使用 NextTrace v1.7.3 普通 TCP traceroute，目标端口为 `ping_port`，每跳请求 10 个延迟样本、最多 30 跳，单次探测超时 1500ms，整个进程限时 90 秒，输出最多 32KB。NextTrace-API 提供跳点 ASN、运营商和位置，PTR 使用反向 DNS；地图生成关闭。GeoIP 信息不完整时，应根据到达结论和延迟样本判断路由，而不是根据位置字段判断连通性。
+
+远端模式由产生该路由结果的 Agent 在自身网络出口执行，每 20 秒拉取任务；本地模式由主控执行。执行标记保存在 `data/mtr-agent.json` / `data/mtr-local.json`，主控选择和报告保存在 SQLite 的 `route_trace_state` 表中。部署时保留配置及 `data/`，避免丢失历史和执行状态。
+
+运行环境与许可证见 [NextTrace 说明](tools/nexttrace/README.md)。首次启用需更新主控和 Agent（当前 Agent 版本 `2026.09.14`），并准备对应平台 NextTrace；只修改 Dashboard 时更新主控即可，Agent 不需要重新安装。
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/mtr?agent_id=...&profile_id=...` | 读取缓存报告，不触发追踪 |
+| `GET /api/agent/mtr` | Agent 拉取追踪任务，使用现有 Agent Token |
+| `POST /api/agent/mtr` | Agent 回传追踪结果，使用现有 Agent Token |
+| `GET /api/agent/nexttrace/<platform>` | 下载 NextTrace；另提供 `LICENSE` 和 `source` 路径 |
+
+Dashboard 和 `/api/mtr` 沿用现有管理 API 的访问方式，没有独立管理认证；应部署在可信内网，或在反向代理层配置访问控制。
 
 ### 看板模块
 
@@ -253,9 +286,11 @@ dns_servers:
 - **管理设置**
   - 单机场模式下可编辑基础域名、探测参数和路由算法
   - 多机场模式下以“机场入口”为主，按机场配置入口域名、缩写、探测源和运营商策略
-  - 分成四个标签页：
+  - 按以下标签页分组（多机场模式隐藏基础设置）：
     - 基础设置
+    - Cloudflare
     - 机场入口
+    - Agent 探针
     - 探测配置
     - 路由算法
   - 保存后会同时：
@@ -278,7 +313,7 @@ dns_servers:
 
 ### 内置国旗资源
 
-地区卡片使用本地 SVG 国旗，不依赖系统 Emoji 渲染，也不访问外部 CDN。资源来自 `flag-icons@7.5.0` 的 `flags/4x3`，按 MIT License 使用，授权文件保存在：
+地区卡片、IP 表现和路由追踪中的地区标签使用本地 SVG 国旗，不依赖系统 Emoji 渲染，也不访问外部 CDN。资源来自 `flag-icons@7.5.0` 的 `flags/4x3`，按 MIT License 使用，授权文件保存在：
 
 ```text
 internal/web/assets/flags/LICENSE.flag-icons
@@ -301,24 +336,19 @@ internal/web/assets/flags/LICENSE.flag-icons
 
 ## 数据保留与生命周期
 
-系统会把运行数据持久化到 `data/` 目录，默认保留最近 30 天：
-
-- `runtime-logs.jsonl`
-- `runtime-history.json`
-- `runtime-samples.json`
+运行数据默认存入配置文件旁的 `data/runtime.db`（SQLite）。旧版的 `runtime-logs.jsonl`、`runtime-history.json` 和 `runtime-samples.json` 用于兼容导入；SQLite 不可用时仍可回退到这些文件，但路由追踪需要 SQLite 保存状态。
 
 当前策略：
 
-- 日志、检测历史、IP 样本都会按 7 天窗口裁剪
-- 同时也有固定上限，避免无限膨胀
-  - `logs`: 2000
-  - `history`: 2000
-  - `samples`: 2000
+- 日志、检测历史和 IP 样本按最近 30 天裁剪；日志另有 2000 条硬上限
+- 历史 API 默认最多返回 2000 条，样本 API 默认最多返回 5000 条；这些返回量限制不等于数据库的保留条数
 - 某个 IP 如果暂时不在最新 DNS 结果里：
   - 不会立刻删掉
   - 会变成游离态保留在 IP 表现面板
-  - 后台不再继续对它做新一轮探测
+  - 后台通常不再主动探测；仍被 DNS 记录使用的当前 IP 会保留在探测集合中，以确认线路健康
   - 超过统计窗口后，它的样本会自然被清理掉
+
+路由追踪报告按当前选路状态复用，不受上述样本窗口控制。清理过期样本不保证 SQLite 文件立即缩小；备份和磁盘维护时应单独规划数据库空间，不能直接删除运行中的 `runtime.db`。
 
 ## 配置
 
@@ -500,6 +530,23 @@ airport_profiles:
 
 ## 编译与运行
 
+### 环境准备
+
+- Go 版本以 `go.mod` 为准，当前声明为 `1.25.0`；构建时允许 Go 自动选择依赖所需的工具链。
+- 下载 NextTrace 使用 Python 3.9+；运行前端检查脚本使用 Node.js。
+- Linux / macOS 路由追踪需要 raw socket 权限。Windows TCP 追踪需要官方 WinDivert 运行库 / 驱动，本项目不自动安装。
+
+NextTrace 以外部进程运行，不嵌入 Go 二进制。首次从源码安装时，在仓库根目录为所需平台下载：
+
+```bash
+python scripts/fetch-nexttrace.py linux-amd64
+# 不传平台则下载 manifest 中的全部平台
+```
+
+支持 `linux-amd64`、`linux-arm64`、`darwin-arm64`、`windows-amd64`。脚本按固定 SHA-256 校验官方二进制，并下载对应许可证和上游源码归档；二进制及 `source-v1.7.3.tar.gz` 被 Git 忽略，干净 checkout 需要重新下载。部署时将它们放在配置目录旁的 `tools/nexttrace/` 下，保留许可证和匹配源码归档。
+
+主控一键安装接口向 Agent 提供 NextTrace 文件，因此主控还需准备 Agent 平台对应的文件。安装脚本下载 NextTrace 失败时会提示，但不会阻止普通延迟探测；仅在提供完整运行库后才能进行路由追踪。
+
 ### 一键构建
 
 ```bash
@@ -510,11 +557,41 @@ chmod +x build.sh
 ### Windows
 
 ```powershell
-go mod tidy
+go mod download
 go build -o dns-latency-router.exe .
 go build -o dns-latency-router-agent.exe ./cmd/dlr-agent
 .\dns-latency-router.exe
 ```
+
+### Linux + systemd
+
+主控示例目录为 `/opt/dns-latency-router`，其中放置 `dns-latency-router`、`config.yaml` 和 `tools/nexttrace/`。在 `/etc/systemd/system/dns-latency-router.service` 中配置：
+
+```ini
+[Unit]
+Description=DNS Latency Router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dns-latency-router
+ExecStart=/opt/dns-latency-router/dns-latency-router /opt/dns-latency-router/config.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now dns-latency-router.service
+sudo systemctl status dns-latency-router.service
+sudo journalctl -u dns-latency-router.service -n 50 --no-pager
+```
+
+Linux Agent 一键安装脚本默认创建 `dns-latency-router-agent.service`，工作目录为 `/opt/dns-latency-router-agent`。
 
 ### Linux + PM2
 
@@ -555,7 +632,28 @@ pm2 delete dns-latency-router
 - `dns-latency-router-agent-darwin-amd64`
 - `dns-latency-router-agent-darwin-arm64`
 
-主控二进制包含嵌入式 Web 仪表盘和本地 SVG 国旗资源；Agent 二进制不包含 Web UI，只负责探测和上报。
+主控二进制包含嵌入式 Web 仪表盘和本地 SVG 国旗资源；Agent 二进制不包含 Web UI，负责探测、路由追踪和上报。现有 Release 工作流只发布 Go 程序及校验文件，不自动打包 NextTrace，需按「环境准备」另外准备。
+
+### 更新已有部署
+
+先备份当前程序、配置和 `data/`，再核对新程序的操作系统、架构与 SHA-256，完成替换后重启对应服务。不要用空目录覆盖现有数据。重跑 Agent 一键安装脚本会重新写入 `agent.yaml` 并重启服务；只想更换程序时应保留原配置和追踪执行标记。
+
+- 修改 Dashboard：重新构建并更新主控，刷新页面即可；无需更新 Agent 或重新运行追踪。
+- 修改共享探测 / NextTrace 执行逻辑：更新主控及相关 Agent，并核对运行库。Agent 版本号相同不代表程序内容相同，应以部署产物 SHA-256 为准。
+- 更换 NextTrace：同时准备该版本许可证和匹配源码，不只复制单个可执行文件。
+
+验证可从以下命令开始：
+
+```bash
+go test ./... -count=1 -timeout=60s
+node scripts/mtr_ui_test.js
+node scripts/ui_poll_test.js
+node scripts/agent_details_test.js
+node scripts/settings_test.js
+bash -n scripts/install-agent.sh
+```
+
+部署后检查服务状态、`/api/status` 和 `/api/mtr`。同一任务的报告 ID、完成时间保持不变，表示读取了缓存；仅 API 返回 `completed` 不等于业务端口健康，还需查看报告中的到达结论和常规探测状态。
 
 ## 代理客户端配置示例
 
@@ -613,7 +711,15 @@ proxies:
 
 ### 5. 为什么日志不会无限增长
 
-日志、历史、IP 样本都只保留最近 30 天，且有固定条数上限，用来防止内存和 UI 无限膨胀。
+日志、历史和 IP 样本按最近 30 天保留，日志另有 2000 条上限。历史和样本 API 限制单次返回量；数据量较大的部署仍需监控 SQLite 文件大小。
+
+### 6. 为什么追踪里有星号或“网络故障”
+
+星号表示该次探测没有收到回应。路由器可能限制探测响应，所以中间跳超时不代表整条线路故障。旧的 `disable-geoip` 报告可能把缺失的地理信息显示为“网络故障”，这是 NextTrace 的位置字段提示，不能据此判断连通性。当前使用 `NextTrace-API`，应以停止原因、终点响应和独立健康探测为准。
+
+### 7. 为什么刷新页面没有重新追踪
+
+路由追踪是选路快照，刷新只读取已保存报告。IP、探针和端口不变时保持首次结果；切换目标后才创建新任务。追踪失败也不会无限重试，先查看技术详情中的安装、权限或超时错误。
 
 ## 适用场景
 
@@ -625,7 +731,9 @@ proxies:
 
 ### 故障确认与记录恢复
 
-候选 IP 全部探测失败时，先保留现有 A 记录并告警；连续 `failure_confirm_cycles` 轮独立探测失败后才执行原有的兜底/删除逻辑。默认 3 轮，旧配置不填写时自动使用该值。此参数通过 YAML 配置；恢复成功或中断观测会清除失败计数。未设置 `alert_webhook_url` 时仅记录日志。
+当前 IP 被实际测量并失败，且有健康候选时立即切换，不等待改进阈值和稳定窗口。所有候选失败时，必须确认当前生效 IP 也在本轮测量且失败，才开始故障确认；当前 IP 没有测量结果时保留 A 记录。
+
+连续 `failure_confirm_cycles` 轮独立探测失败后才执行兜底/删除逻辑。默认 3 轮，此参数通过 YAML 配置；重复使用同一 Agent 报告不增加轮数，恢复成功、中断观测或读取 Cloudflare 失败会清除失败计数。未设置 `alert_webhook_url` 时仅记录日志。
 
 单入口模式确认故障后优先使用已配置的 `fallback_baseline_ip`，未配置则删除；多机场/地区记录沿用确认后删除的策略，不把一个全局兜底 IP 自动套用于所有地区。兜底地址必须是可用公网 IPv4。
 

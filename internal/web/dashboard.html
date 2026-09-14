@@ -791,6 +791,53 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
 .agent-task-fields dd{margin:0;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
 .agent-task-footnote{color:#78909c;font-size:12px;line-height:1.7;margin-top:20px}
 @media(max-width:480px){.agent-task-shell{padding:22px 18px}.agent-task-metrics{gap:6px}.agent-task-metrics strong{font-size:23px}}
+
+.mtr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,400px),1fr));gap:14px;align-items:start}
+.mtr-card{border:1px solid var(--line);border-radius:16px;background:rgba(8,18,26,.45);padding:16px;min-width:0;overflow:hidden;align-self:start}
+.mtr-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.mtr-head h3{font:700 15px/1.5 var(--mono);margin:0;overflow-wrap:anywhere}
+.mtr-kicker{margin:0 0 4px;color:var(--green-bright);font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+.mtr-head>div{min-width:0}
+.mtr-geo{white-space:normal;overflow-wrap:anywhere;line-height:1.5}
+.mtr-head .sub-chip{flex-shrink:0}
+.mtr-state-good{color:#9ff5d1;background:var(--green-bg);border-color:rgba(32,214,162,.25)}
+.mtr-state-warn{color:#fde68a;background:rgba(251,191,36,.08)}
+.mtr-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:18px 0;padding:14px 0;border-block:1px solid var(--line)}
+.mtr-facts div{min-width:0}
+.mtr-facts dt{color:var(--muted);font-size:11px;margin-bottom:6px}
+.mtr-facts dd{font:700 19px/1.4 var(--mono);margin:0;color:var(--text)}
+.mtr-facts small{font:12px var(--sans);color:var(--muted);margin-left:4px}
+.mtr-path-label{margin:0 0 8px;font-size:11px;color:var(--muted)}
+.mtr-path{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:0 0 16px;padding:0;list-style:none}
+.mtr-path li{display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:1.7;overflow-wrap:anywhere}
+.mtr-path li:not(:last-child):after{content:'→';color:var(--faint)}
+.mtr-path span{padding:3px 8px;background:rgba(255,255,255,.035);border-radius:6px}
+.mtr-card summary{cursor:pointer;line-height:1.6;font-size:12px;color:var(--muted);padding:12px 0}
+.mtr-card summary:hover{color:var(--text)}
+.mtr-card summary:focus-visible{outline:2px solid var(--green-bright);outline-offset:3px;border-radius:4px}
+.mtr-hops,.mtr-raw{border-top:1px solid var(--line)}
+.mtr-hop-list{list-style:none;margin:2px 0 14px;padding:0}
+.mtr-hop{display:grid;grid-template-columns:26px minmax(0,1fr);gap:10px;position:relative;padding-bottom:16px}
+.mtr-hop:not(:last-child):before{content:'';position:absolute;left:12px;top:27px;bottom:2px;border-left:1px solid var(--line2)}
+.mtr-hop-number{border:1px solid var(--line2);border-radius:50%;width:26px;height:26px;display:grid;place-items:center;font:11px var(--mono);color:var(--muted)}
+.mtr-hop-target .mtr-hop-number{background:var(--green-bg);border-color:var(--green);color:#9ff5d1}
+.mtr-hop-response{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;min-width:0}
+.mtr-hop-response+.mtr-hop-response{margin-top:10px}
+.mtr-hop-identity{min-width:0;overflow-wrap:anywhere}
+.mtr-hop-location{font-size:13px;line-height:1.8;color:var(--text)}
+.mtr-hop-network,.mtr-hop-ip,.mtr-hop-replies{font-size:11px;line-height:1.7;color:var(--muted)}
+.mtr-hop-ip{font-family:var(--mono);color:var(--faint)}
+.mtr-hop-timing{text-align:right;flex-shrink:0}
+.mtr-hop-latency{font:600 13px/1.8 var(--mono);white-space:nowrap}
+.mtr-hop-gap{padding-top:2px;color:var(--muted);font-size:12px;line-height:1.8}
+.mtr-note{font-size:12px;line-height:1.8;color:var(--muted);margin:12px 0;overflow-wrap:anywhere}
+.mtr-card .mtr-meta{color:var(--muted);font-size:12px;margin:10px 0;line-height:1.7}
+.mtr-card pre{font:11px/1.8 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto;max-height:400px;margin:0 0 12px;padding:14px;border-radius:10px;background:rgba(0,0,0,.24);color:var(--muted);color-scheme:dark}
+.mtr-empty{color:var(--muted);padding:16px 0;font-size:13px}
+#mtrSection{margin-bottom:20px}
+#mtrSection .section-title{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+#mtrCount{flex-shrink:0;white-space:nowrap}
+@media(max-width:480px){#mtrSection .section-title{flex-wrap:wrap}.mtr-facts{gap:8px}.mtr-facts dd{font-size:17px}.mtr-head h3{font-size:14px}.mtr-hop-response{flex-wrap:wrap}.mtr-hop-timing{text-align:left}}
 </style>
 </head>
 <body>
@@ -920,6 +967,11 @@ h1{margin:0;font-size:21px;font-weight:850;letter-spacing:-.02em;color:var(--tex
       <div class="section-title"><div><h2>地区解析矩阵</h2><p>当前机场按 IP 归属地分组后，分别写入对应地区域名；高亮翡翠绿为当前命中的生效线路。</p></div><span class="sub-chip shrink-0 whitespace-nowrap" id="regionCount">0 个地区</span></div>
       <div class="region-hero" id="regionHero"></div>
       <div class="region-grid" id="regionCards"></div>
+    </section>
+
+    <section class="panel section" id="mtrSection">
+      <div class="section-title"><div><h2>优选 IP · 路由追踪</h2><p id="mtrHint">从当前探针到优选 IP，查看沿途位置与响应延迟。展示首次追踪的快照，IP 不变时沿用；中间路由器未回应不代表断网。</p></div><span class="sub-chip" id="mtrCount">等待报告</span></div>
+      <div class="mtr-grid" id="mtrCards"><div class="mtr-empty">等待优选 IP 的追踪结果</div></div>
     </section>
 
     <section class="panel section" id="chartSection">
@@ -1144,7 +1196,7 @@ function renderRegionHero(entry,children,stats){if(!entry){els.regionHero.classL
 function selectRegionIP(ip,region,stats){const match=(stats||[]).find(stat=>stat.ip===ip&&region&&stat.region===region.region)||(stats||[]).find(stat=>stat.ip===ip);persistSelectedIP(ip,match?match.agentId||'':'');loadSelectedSamples(getCurrentProfile(lastStatus))}
 function renderRegionCards(profile,stats,regions){stats=stats||filterForCurrentView(lastStats,profile);regions=regions||buildAgentViewRegions(profile,stats);const entry=regions.find(region=>region.region==='entry')||null;const entryIP=entry?(entry.currentIP||entry.bestIP||''):'';const children=regions.filter(region=>region.region!=='entry');els.regionCount.textContent=children.length+' 个子区域';if(!regions.length){els.regionSection.classList.remove('active');els.regionHero.classList.remove('active');els.regionHero.innerHTML='';els.regionCards.innerHTML='';return}els.regionSection.classList.add('active');renderRegionHero(entry,children,stats);els.regionCards.innerHTML=children.map(region=>{const vm=regionViewModel(region,stats);const regionIP=vm.ip||'';const classes=['region-card',region.status||'',regionIP&&regionIP===entryIP?'route-hit':'',regionIP&&regionIP===selectedIP?'active':''].filter(Boolean).join(' ');return'<article class=\"'+escapeHTML(classes)+'\" data-ip=\"'+escapeHTML(regionIP)+'\" data-tooltip=\"'+escapeHTML(vm.tooltip)+'\"><div class=\"region-top\"><div class=\"region-identity\">'+regionTitleHTML(region)+'</div><span class=\"region-status\">'+escapeHTML(statusText(region.status))+'</span></div><div class=\"region-address\"><div class=\"region-ip\">'+escapeHTML(vm.ip||'-')+'</div><div class=\"region-domain\" title=\"'+escapeHTML(region.customDomain||'-')+'\">'+escapeHTML(region.customDomain||'-')+'</div></div><div class=\"region-geo'+(vm.geo?'':' muted')+'\">'+escapeHTML(vm.geo||'未知')+'</div><div class=\"region-metrics\"><div class=\"region-metric prime\"><span>平均延迟</span><strong>'+escapeHTML(vm.avgLatency)+'</strong></div><div class=\"region-metric prime\"><span>综合评分</span><strong>'+escapeHTML(vm.bestScore)+'</strong></div><div class=\"region-metric\"><span>平均抖动</span><strong>'+escapeHTML(vm.avgJitter)+'</strong></div><div class=\"region-metric\"><span>平均丢包</span><strong>'+escapeHTML(vm.avgLoss)+'</strong></div><div class=\"region-metric\"><span>最快延迟</span><strong>'+escapeHTML(vm.bestLatency)+'</strong></div><div class=\"region-metric\"><span>成功率</span><strong>'+escapeHTML(vm.success)+'</strong></div></div><div class=\"region-compact\"><span class=\"region-chip\">候选 '+escapeHTML(region.candidateCount||0)+'</span>'+(regionIP&&regionIP===entryIP?'<span class=\"hit-indicator\">● 当前命中</span>':'')+'</div></article>'}).join('');Array.from(els.regionCards.querySelectorAll('.region-card[data-ip]')).forEach(card=>card.addEventListener('click',()=>{if(!card.dataset.ip)return;selectRegionIP(card.dataset.ip,children.find(region=>(region.currentIP||region.bestIP||'')===card.dataset.ip),stats);refreshProfileView()}));const heroCard=els.regionHero.querySelector('.region-hero-card[data-ip]');if(heroCard)heroCard.addEventListener('click',()=>{if(!heroCard.dataset.ip)return;selectRegionIP(heroCard.dataset.ip,entry,stats);refreshProfileView()})}
 function filterForProfile(items,profile){if(!profile)return items||[];return(items||[]).filter(item=>!item.profileId||item.profileId===profile.id)}
-function refreshProfileView(){if(!lastStatus)return;const profile=getCurrentProfile(lastStatus);renderProfileRail(lastStatus);const filteredStats=filterForCurrentView(lastStats,profile);const regions=buildAgentViewRegions(profile,filteredStats);renderRegionCards(profile,filteredStats,regions);ipSamples=filterForCurrentView(lastSamples,profile);if(selectedIP&&!filteredStats.some(statSelected))persistSelectedIP('');renderIPStats(filteredStats);const primary=regions.length?regions.find(r=>r.currentIP)||regions[0]:null;updateCurrentIPMeta(primary?primary.currentIP:'',filteredStats);drawChart()}
+function refreshProfileView(){if(!lastStatus)return;const profile=getCurrentProfile(lastStatus);renderProfileRail(lastStatus);const filteredStats=filterForCurrentView(lastStats,profile);const regions=buildAgentViewRegions(profile,filteredStats);renderRegionCards(profile,filteredStats,regions);ipSamples=filterForCurrentView(lastSamples,profile);if(selectedIP&&!filteredStats.some(statSelected))persistSelectedIP('');renderIPStats(filteredStats);const primary=regions.length?regions.find(r=>r.currentIP)||regions[0]:null;updateCurrentIPMeta(primary?primary.currentIP:'',filteredStats);drawChart();refreshMTRView();}
 function switchProfile(profileID){selectedProfileID=profileID||'';if(selectedProfileID)localStorage.setItem('dlr:selected-profile',selectedProfileID);persistSelectedIP('');if(!lastStatus)return;updateStatus(lastStatus);renderProfileRail(lastStatus);setTimeout(()=>{refreshProfileView();loadSelectedSamples(getCurrentProfile(lastStatus))},0)}
 function drawChart(){
 resizeCanvas();
@@ -1324,6 +1376,102 @@ function setCycleCollapsed(key,next){collapsedLogCycles[key]=next}
 function updateLogAutofollowButton(){els.logAutofollow.classList.toggle('active',autoFollowLogs);els.logAutofollow.textContent=autoFollowLogs?'自动跟随':'已锁定'}
 function renderLogs(entries,force){const nextSignature=entries.length?entries[entries.length-1].time+'|'+entries[entries.length-1].line+'|'+entries.length:'0';if(!force&&nextSignature===logsSignature)return;rawLogEntries=entries||[];const prevTop=els.logBody.scrollTop;const prevHeight=els.logBody.scrollHeight;const groups=groupLogs(rawLogEntries).map(group=>({...group,visibleItems:group.items.filter(matchesLogFilter)})).filter(group=>group.visibleItems.length>0);els.logCount.textContent=groups.reduce((sum,group)=>sum+group.visibleItems.length,0)+' 条';els.logMeta.textContent=activeLogFilter==='all'?'按检测周期分组显示，默认自动跟随最新日志':activeLogFilter==='ping'?'仅展示延迟探测结果，方便横向对比节点表现':activeLogFilter==='decision'?'只看选路判断、切换动作和错误信息':'只看系统状态与倒计时提示';if(!groups.length){els.logBody.innerHTML='<div class="log-empty">当前筛选条件下没有日志，换个过滤标签看看。</div>';logsSignature=nextSignature;return}let prevRenderedGroup=null;const latestCycleIndex=Math.max(...groups.filter(group=>group.type==='cycle').map(group=>group.cycleIndex),0);els.logBody.innerHTML=groups.map(group=>{const title=groupTitle(group,prevRenderedGroup);prevRenderedGroup=group;const latestClass=group.type==='cycle'&&group.cycleIndex===latestCycleIndex?' latest':'';const collapsed=isCycleCollapsed(group,latestCycleIndex);const key=cycleCollapseKey(group);const toggleLabel=collapsed?'展开':'收起';return'<section class="log-cycle'+latestClass+(collapsed?' collapsed':'')+'" data-cycle-key="'+escapeHTML(key)+'"><div class="log-cycle-head"><span class="log-cycle-title">'+escapeHTML(title)+'</span><div class="log-cycle-controls"><span class="log-cycle-count">'+group.visibleItems.length+' 条</span>'+(group.type==='cycle'?'<button class="log-cycle-toggle'+(collapsed?'':' active')+'" type="button" data-cycle-toggle="'+escapeHTML(key)+'">'+toggleLabel+'</button>':'')+'</div></div>'+renderGroupSummary(group)+'<div class="log-cycle-lines">'+group.visibleItems.map(renderLogLine).join('')+'</div></section>'}).join('');Array.from(els.logBody.querySelectorAll('[data-cycle-toggle]')).forEach(btn=>btn.addEventListener('click',()=>{const key=btn.dataset.cycleToggle;const wrapper=btn.closest('.log-cycle');const isCollapsed=!wrapper.classList.contains('collapsed');setCycleCollapsed(key,isCollapsed);renderLogs(rawLogEntries,true)}));logsSignature=nextSignature;if(autoFollowLogs){els.logBody.scrollTop=els.logBody.scrollHeight}else{const nextHeight=els.logBody.scrollHeight;els.logBody.scrollTop=Math.max(0,prevTop+(nextHeight-prevHeight))}}
 function setLogFilter(filter){activeLogFilter=filter;Array.from(els.logFilters.querySelectorAll('.filter-tag')).forEach(btn=>btn.classList.toggle('active',btn.dataset.filter===filter));renderLogs(rawLogEntries,true)}
+let mtrViewSeq=0,mtrRenderSignature='',mtrFetchAbort=null;
+function mtrTimingValues(text){return Array.from(String(text||'').matchAll(/(\*|\d+(?:\.\d+)?)\s*ms/g)).map(match=>match[1]==='*'?null:Number(match[1]))}
+function mtrAverage(values){const nums=(values||[]).filter(value=>Number.isFinite(value));if(!nums.length)return null;return nums.reduce((sum,value)=>sum+value,0)/nums.length}
+function parseMTRRoute(row){
+  const output=String(row.output||''),lines=output.replace(/\x1b\[[0-9;]*[A-Za-z]/g,'').split(/\r?\n/),hops=[];
+  const addressPattern=/^((?:\d{1,3}\.){3}\d{1,3}|[0-9a-f]*:[0-9a-f:]+)\s+(AS\d+|\*)(?:\s+|$)(.*)$/i;
+  let source='',target=row.ip||'',stopText='',stopHop=0,hop=null,responder=null;
+  // Parse the cached realtime format. Unsupported legacy formats retain raw details.
+  for(const raw of lines){
+    let line=raw.trim();
+    const route=line.match(/^(\S+)\s+(?:->|→)\s+(\S+),\s+\d+\s+hops max/i);
+    if(route){source=route[1];target=route[2];continue}
+    const stopped=line.match(/^Trace Stopped:\s*(.+)$/i);
+    if(stopped){stopText=stopped[1];const atHop=stopText.match(/at Hop\s+(\d+)/i);stopHop=atHop?Number(atHop[1]):0;break}
+    const numbered=line.match(/^(\d+)\s+(.+)$/);
+    if(numbered){
+      const number=Number(numbered[1]);line=numbered[2];
+      if(number<1||number>255||line!=='*'&&!addressPattern.test(line)){hop=null;responder=null;continue}
+      hop=hops.find(item=>item.number===number);
+      if(!hop){hop={number,responders:[]};hops.push(hop)}
+      responder=null;
+    }
+    if(!hop||!line||/^\[MPLS:|^MapTrace URL:/i.test(line))continue;
+    // Repeated IP groups within a TTL are indented, without another hop number.
+    const address=line.match(addressPattern);
+    if(address){
+      let meta=address[3].trim();const label=(meta.match(/^\[([^\]]+)\]\s*/)||[]);meta=meta.replace(/^\[[^\]]+\]\s*/,'');
+      const owner=meta.match(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b/i);
+      let location=(owner?meta.slice(0,owner.index):meta).replace(/\s+/g,' ').trim();
+      const network=owner?meta.slice(owner.index).replace(/\s+/g,' ').trim():label[1]||'';
+      if(/RFC1918|LAN Address|Private|本地局域网/i.test(location))location='本地网络';
+      if(/^(网络故障|Network Error|Unknown|未知|\*)$/i.test(location))location='位置未知';
+      responder={ip:address[1],asn:address[2]==='*'?'':address[2],location:location||'位置未知',network,hostname:'',values:[]};
+      hop.responders.push(responder);continue;
+    }
+    if(responder){const first=line.search(/(?:\*|\d+(?:\.\d+)?)\s*ms\b/);if(first>=0){responder.values.push(...mtrTimingValues(line.slice(first)));const hostname=line.slice(0,first).trim();if(hostname)responder.hostname=hostname}}
+  }
+  hops.sort((a,b)=>a.number-b.number);
+  const targetResponders=hops.flatMap(item=>item.responders).filter(item=>item.ip===target);
+  return{output,source,target,stopText,stopHop,hops,targetValues:targetResponders.flatMap(item=>item.values),reached:/^Destination Reached\b/i.test(stopText)};
+}
+function mtrPathHTML(route){
+  const locations=[];
+  for(const hop of route.hops){const names=[...new Set(hop.responders.map(item=>item.location).filter(name=>name!=='位置未知'))];const label=names.join(' / ');if(label&&locations[locations.length-1]!==label)locations.push(label)}
+  if(!locations.length)return'<li><span>暂无位置信息</span></li>';
+  return locations.map(location=>'<li><span>'+escapeHTML(location)+'</span></li>').join('');
+}
+function mtrGeoText(row){
+  const stats=lastStats||[];
+  const stat=stats.find(item=>item&&item.ip===row.ip&&(!row.agentId||!item.agentId||item.agentId===row.agentId)&&(!row.profileId||!item.profileId||item.profileId===row.profileId))||stats.find(item=>item&&item.ip===row.ip);
+  const geo=String(stat&&stat.geo||'').trim();return geo&&geo!=='未知'?formatGeoLabel(geo):'';
+}
+function mtrHopRowsHTML(route){
+  const rows=[];
+  for(let i=0;i<route.hops.length;i++){
+    const hop=route.hops[i];
+    if(!hop.responders.length){const start=hop.number;let end=start;while(i+1<route.hops.length&&!route.hops[i+1].responders.length&&route.hops[i+1].number===end+1){end=route.hops[++i].number}rows.push('<li class="mtr-hop"><span class="mtr-hop-number" aria-hidden="true">·</span><div class="mtr-hop-gap">第 '+start+(end>start?'–'+end:'')+' 跳未回应</div></li>');continue}
+    const responses=hop.responders.map(item=>{
+      const avg=mtrAverage(item.values),replyCount=item.values.filter(Number.isFinite).length,network=[item.network,item.asn].filter(Boolean).join(' · ');
+      return '<div class="mtr-hop-response"><div class="mtr-hop-identity"><div class="mtr-hop-location">'+escapeHTML(item.location)+(item.ip===route.target?' · 目标':'')+'</div>'+(network?'<div class="mtr-hop-network">'+escapeHTML(network)+'</div>':'')+'<div class="mtr-hop-ip">'+escapeHTML(item.ip)+'</div></div><div class="mtr-hop-timing"><div class="mtr-hop-latency">'+(avg===null?'—':avg.toFixed(1)+' ms')+'</div><div class="mtr-hop-replies">'+(item.values.length?replyCount+'/'+item.values.length+' 次回应':'暂无延迟样本')+'</div></div></div>';
+    }).join('');
+    rows.push('<li class="mtr-hop'+(hop.responders.some(item=>item.ip===route.target)?' mtr-hop-target':'')+'"><span class="mtr-hop-number">'+hop.number+'</span><div>'+responses+'</div></li>');
+  }
+  return rows.join('')||'<li class="mtr-note">没有可整理的逐跳数据，请展开技术详情。</li>';
+}
+function mtrCardHTML(row){
+  const route=parseMTRRoute(row),completed=row.status==='completed',timestamp=row.finishedAt&&!String(row.finishedAt).startsWith('0001-')?new Date(row.finishedAt).toLocaleString():'尚未完成';
+  const avg=mtrAverage(route.targetValues),hopCount=route.stopHop||(route.hops.length?route.hops[route.hops.length-1].number:0),replyCount=route.targetValues.filter(Number.isFinite).length;
+  const state=completed&&route.reached?'已到达目标':row.status==='failed'?'追踪失败':completed&&route.stopText?'未到达目标':completed?'结果待确认':row.status==='running'?'正在追踪':'等待追踪';
+  const stateClass=completed&&route.reached?'mtr-state-good':completed||row.status==='failed'?'mtr-state-warn':'';
+  let note='';
+  if(row.status==='failed')note='本次追踪未能完成'+(route.hops.length?'，下方保留已收到的结果。':'，可在技术详情查看原因。');
+  else if(completed&&!route.reached)note=/Maximum Hops Reached/i.test(route.stopText)?'已到达跳数上限，尚未确认到达目标。':/No Continuing Route Observed/i.test(route.stopText)?'收到不可达回应，追踪已停止。':'报告未包含明确的到达结论，可在技术详情查看原文。';
+  else if(!completed)note='探针正在排队或追踪，完成后会自动展示结果。';
+  const detailKey=escapeHTML(row.id),body=[row.error,row.output].filter(Boolean).join('\n\n')||'等待探针完成追踪。';
+  const geo=mtrGeoText(row);
+  return '<article class="mtr-card" data-trace-id="'+detailKey+'"><div class="mtr-head"><div><p class="mtr-kicker">优选 IP</p><h3>'+escapeHTML(row.ip)+'</h3>'+(geo?'<span class="region-geo mtr-geo">'+geoFlagHTML(geo)+escapeHTML(geo)+'</span>':'')+'</div><span class="sub-chip '+stateClass+'">'+escapeHTML(state)+'</span></div><p class="mtr-meta">快照 · '+escapeHTML(timestamp)+'</p><dl class="mtr-facts"><div><dt>记录跳数</dt><dd>'+(hopCount||'—')+'<small>跳</small></dd></div><div><dt>终点平均延迟</dt><dd>'+(avg===null?'—':avg.toFixed(1))+'<small>'+(avg===null?'':'ms')+'</small></dd></div><div><dt>终点回应</dt><dd>'+(route.targetValues.length?replyCount+'/'+route.targetValues.length:'—')+'<small>次</small></dd></div></dl>'+(note?'<p class="mtr-note">'+escapeHTML(note)+'</p>':'')+'<p class="mtr-path-label">途经位置 · 相邻重复位置已合并</p><ul class="mtr-path">'+mtrPathHTML(route)+'</ul><details class="mtr-hops" data-mtr-detail="'+detailKey+'|hops"><summary>查看逐跳详情</summary><p class="mtr-note">延迟为探针到该跳的平均往返时间。未回应可能是路由器限速，不等同于业务丢包；到达目标也不代表业务端口正常。</p><ol class="mtr-hop-list">'+mtrHopRowsHTML(route)+'</ol></details><details class="mtr-raw" data-mtr-detail="'+detailKey+'|raw"><summary>技术详情 · 原始报告</summary><p class="mtr-meta">TCP '+escapeHTML(row.port)+' · 每跳最多 10 个延迟样本</p><pre>'+escapeHTML(body)+'</pre></details></article>';
+}
+async function refreshMTRView(){
+  const container=document.getElementById('mtrCards');if(!container)return;
+  const seq=++mtrViewSeq,profile=getCurrentProfile(lastStatus),agentID=currentViewAgentID();
+  const key=agentID+'|'+(profile&&profile.id||'');
+  if(container.dataset.viewKey!==key){container.dataset.viewKey=key;mtrRenderSignature='';container.innerHTML='<div class="mtr-empty">正在读取此探针的 MTR 报告…</div>'}
+  const url='/api/mtr?agent_id='+encodeURIComponent(agentID)+(profile?'&profile_id='+encodeURIComponent(profile.id):'');
+  try{
+    if(mtrFetchAbort)mtrFetchAbort.abort();mtrFetchAbort=new AbortController();
+    const res=await fetch(url,{cache:'no-store',signal:mtrFetchAbort.signal});if(!res.ok)throw new Error('MTR unavailable');
+    const rows=await res.json();if(seq!==mtrViewSeq)return;
+    const signature=key+'|'+JSON.stringify([rows,rows.map(mtrGeoText)]);if(signature===mtrRenderSignature)return;mtrRenderSignature=signature;
+    const openIDs=new Set(Array.from(container.querySelectorAll('details[data-mtr-detail][open]').values()).map(el=>el.dataset.mtrDetail));
+    container.innerHTML=rows.length?rows.map(mtrCardHTML).join(''):'<div class="mtr-empty">此探针暂无已生效的 IP 追踪任务；需要支持 MTR 的新版 Agent。</div>';
+    container.querySelectorAll('details[data-mtr-detail]').forEach(el=>{el.open=openIDs.has(el.dataset.mtrDetail)});
+    document.getElementById('mtrCount').textContent=rows.length+' 个优选 IP';
+  }catch(err){if(seq===mtrViewSeq)container.innerHTML='<div class="mtr-empty">MTR 报告暂时不可用，稍后自动重试读取。</div>'}
+}
+
 async function pollOnce(){if(pollInFlight)return;pollInFlight=true;try{const [statusRes,historyRes,ipStatsRes,agentReportsRes,logsRes]=await Promise.all([fetch('/api/status',{cache:'no-store'}),fetch('/api/history',{cache:'no-store'}),fetch('/api/ip-stats',{cache:'no-store'}),fetch('/api/agent/reports',{cache:'no-store'}),fetch('/api/logs',{cache:'no-store'})]);const [statusData,historyData,ipStatsData,agentReportsData,logsData]=await Promise.all([statusRes.json(),historyRes.json(),ipStatsRes.json(),agentReportsRes.json(),logsRes.json()]);lastStatus=statusData;lastStats=ipStatsData||[];lastAgentReports=agentReportsData||[];latencyHistory=historyData||[];updateStatus(statusData);refreshProfileView();await loadSelectedSamples(getCurrentProfile(statusData));renderLogs(logsData||[]);setStatus(true,statusData&&statusData.isRunning?'running':'online')}catch(err){setStatus(false,'disconnected')}finally{pollInFlight=false}}
 function startPolling(){pollOnce();if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(pollOnce,3000)}
 function showToast(msg,err){els.toast.textContent=msg;els.toast.className='toast show'+(err?' error':'');setTimeout(()=>{els.toast.className='toast'},3000)}

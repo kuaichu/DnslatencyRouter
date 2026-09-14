@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"path/filepath"
 
 	"dns-latency-router/internal/agent"
 	"dns-latency-router/internal/config"
@@ -25,5 +26,5 @@ func main() {
 		log.Fatalf("agent binary requires node_role: agent in %s", configPath)
 	}
 
-	agent.Run(cfg)
+	agent.Run(cfg, filepath.Dir(configPath))
 }

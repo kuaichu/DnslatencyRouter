@@ -92,6 +92,7 @@ type ProfileStatus struct {
 }
 
 type RegionStatus struct {
+	AgentID        string  `json:"agentId,omitempty"`
 	Region         string  `json:"region"`
 	Label          string  `json:"label"`
 	CustomDomain   string  `json:"customDomain"`
@@ -116,6 +117,7 @@ type CheckRecord struct {
 
 // Server is the web dashboard HTTP server.
 type Server struct {
+	traces                *traceManager
 	port                  int
 	status                atomic.Value
 	history               []CheckRecord
@@ -214,6 +216,7 @@ func New(port int, cfgPath string, triggerCh chan<- struct{}) *Server {
 	s.loadPersistedData()
 	s.ensureGeoForSamples()
 	s.status.Store(&Status{CheckIntervalSec: 300})
+	s.initMTR()
 	return s
 }
 
@@ -225,6 +228,9 @@ func (s *Server) Start() {
 	mux.HandleFunc("/console/", s.redirectLegacyConsole)
 	mux.HandleFunc("/", s.handleDashboard)
 	mux.HandleFunc("/api/status", s.handleAPIStatus)
+	mux.HandleFunc("/api/mtr", s.handleAPIMTR)
+	mux.HandleFunc("/api/agent/mtr", s.handleAPIAgentMTR)
+	mux.HandleFunc("/api/agent/nexttrace/", s.handleAPINextTraceDownload)
 	mux.HandleFunc("/api/history", s.handleAPIHistory)
 	mux.HandleFunc("/api/ip-stats", s.handleAPIIPStats)
 	mux.HandleFunc("/api/ip-samples", s.handleAPIIPSamples)
@@ -262,6 +268,9 @@ func (s *Server) WaitReady() {
 
 // Stop shuts down the HTTP server.
 func (s *Server) Stop() {
+	if s.traces != nil && s.traces.local != nil {
+		s.traces.local.Close()
+	}
 	if s.httpServer != nil {
 		s.httpServer.Close()
 	}
@@ -463,6 +472,10 @@ func (s *Server) candidateIPsForProfile(profileID string) []string {
 			add(region.CurrentIP)
 		}
 	}
+	currentIPs := make(map[string]bool, len(seen))
+	for ip := range seen {
+		currentIPs[ip] = true
+	}
 	s.activeIPsMu.RLock()
 	if profileID != "" {
 		for ip := range s.activeIPsByProfile[profileID] {
@@ -508,10 +521,18 @@ func (s *Server) candidateIPsForProfile(profileID string) []string {
 	for ip := range seen {
 		ips = append(ips, ip)
 	}
-	sort.Strings(ips)
 	if len(ips) > 128 {
-		ips = ips[:128]
+		// Reserve slots for every in-use route before limiting historical
+		// candidates, so agents can still detect failure after DNS omits it.
+		sort.Slice(ips, func(i, j int) bool {
+			if currentIPs[ips[i]] != currentIPs[ips[j]] {
+				return currentIPs[ips[i]]
+			}
+			return ips[i] < ips[j]
+		})
+		ips = ips[:max(128, len(currentIPs))]
 	}
+	sort.Strings(ips)
 	return ips
 }
 
@@ -1148,7 +1169,7 @@ func (s *Server) handleAPIAgentInstallScript(w http.ResponseWriter, r *http.Requ
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(scripts.AgentInstaller)
+	_, _ = io.WriteString(w, strings.ReplaceAll(string(scripts.AgentInstaller), "\r\n", "\n"))
 }
 
 func (s *Server) handleAPIAgentInstallCommand(w http.ResponseWriter, r *http.Request) {

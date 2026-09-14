@@ -23,22 +23,24 @@ import (
 )
 
 type switchController struct {
-	routes         map[string]*routeSwitchState
-	candidateIP    string
-	candidateSince time.Time
-	failures       failureObservation
-	outageActive   bool
-	lastAlertAt    time.Time
-	orgCache       map[string]string
-	geoCache       map[string]web.GeoInfo
+	routes              map[string]*routeSwitchState
+	candidateIP         string
+	candidateSince      time.Time
+	candidateObservedAt time.Time
+	failures            failureObservation
+	outageActive        bool
+	lastAlertAt         time.Time
+	orgCache            map[string]string
+	geoCache            map[string]web.GeoInfo
 }
 
 type routeSwitchState struct {
-	candidateIP    string
-	candidateSince time.Time
-	failures       failureObservation
-	outageActive   bool
-	lastAlertAt    time.Time
+	candidateIP         string
+	candidateSince      time.Time
+	candidateObservedAt time.Time
+	failures            failureObservation
+	outageActive        bool
+	lastAlertAt         time.Time
 }
 
 type cycleOutcome struct {
@@ -51,6 +53,7 @@ type cycleOutcome struct {
 func (c *switchController) reset() {
 	c.candidateIP = ""
 	c.candidateSince = time.Time{}
+	c.candidateObservedAt = time.Time{}
 }
 
 func (c *switchController) clearOutage() {
@@ -107,6 +110,7 @@ func (c *switchController) resetRoute(key string) {
 	st := c.route(key)
 	st.candidateIP = ""
 	st.candidateSince = time.Time{}
+	st.candidateObservedAt = time.Time{}
 }
 
 func (c *switchController) clearRouteOutage(key string) {
@@ -784,7 +788,9 @@ func runCarrierRecordDecisions(cfg *config.Config, profile config.AirportProfile
 			results := checkerResultsFromAgent(profileReport.Results, cfg, profileReport.FinishedAt)
 			applyTimePenalty(cfg, sc, results, now)
 			rec := profile.CarrierRecords[carrier]
-			statuses = append(statuses, runProfileRecordDecision(cfg, profile, carrierRecordRegion(carrier), rec, results, sc, now))
+			status := runProfileRecordDecision(cfg, profile, carrierRecordRegion(carrier), rec, results, sc, now)
+			status.AgentID = report.AgentID
+			statuses = append(statuses, status)
 			used[carrier] = true
 		}
 	}
@@ -839,7 +845,9 @@ func runAgentRegionRecordDecisions(cfg *config.Config, profile config.AirportPro
 		carrierProfile.Carrier = carrier
 		carrierProfile.ProbeSource = report.ProbeSource
 		entryRec := carrierEntryRecordFor(cfg, carrierProfile, carrier)
-		statuses = append(statuses, runProfileRecordDecision(cfg, carrierProfile, carrierRecordRegion(carrier), entryRec, results, sc, now))
+		entryStatus := runProfileRecordDecision(cfg, carrierProfile, carrierRecordRegion(carrier), entryRec, results, sc, now)
+		entryStatus.AgentID = report.AgentID
+		statuses = append(statuses, entryStatus)
 
 		resultsByRegion := make(map[string][]checker.Result)
 		for _, result := range results {
@@ -857,7 +865,9 @@ func runAgentRegionRecordDecisions(cfg *config.Config, profile config.AirportPro
 		for _, region := range sortedRegionKeys(resultsByRegion) {
 			rec := regionRecordFor(cfg, carrierProfile, region)
 			rec.Label = config.CarrierLabel(carrier) + " · " + config.RegionLabel(region)
-			statuses = append(statuses, runProfileRecordDecision(cfg, carrierProfile, carrierRegionRecordRegion(carrier, region), rec, resultsByRegion[region], sc, now))
+			status := runProfileRecordDecision(cfg, carrierProfile, carrierRegionRecordRegion(carrier, region), rec, resultsByRegion[region], sc, now)
+			status.AgentID = report.AgentID
+			statuses = append(statuses, status)
 		}
 	}
 	return statuses
@@ -978,6 +988,7 @@ func decideProfileRecord(cfg *config.Config, profile config.AirportProfile, regi
 		}
 		if err != nil {
 			sc.resetRoute(profile.ID + "|" + region)
+			sc.route(profile.ID + "|" + region).failures = failureObservation{}
 			if best == nil && recordNotFound(err) {
 				log.Printf("[update] [%s/%s] A record %s is already absent and no healthy candidate is available", profile.ID, region, recordTargetLabel(rec))
 				status.Status = "deleted"
@@ -996,6 +1007,7 @@ func decideProfileRecord(cfg *config.Config, profile config.AirportProfile, regi
 				log.Printf("[update] [%s/%s] A record %s is already absent and no healthy candidate is available", profile.ID, region, rec.CustomDomain)
 			} else if !recordNotFound(err) {
 				sc.resetRoute(profile.ID + "|" + region)
+				sc.route(profile.ID + "|" + region).failures = failureObservation{}
 				log.Printf("[error] [%s/%s] read current Cloudflare record failed: %v", profile.ID, region, err)
 				status.Status = "read_failed"
 				return status
@@ -1014,12 +1026,19 @@ func decideProfileRecord(cfg *config.Config, profile config.AirportProfile, regi
 	status.CurrentIP = currentIP
 	status.Latency = resultLatencyMs(current)
 	routeKey := profile.ID + "|" + region
+	if best != nil {
+		status.BestIP = best.IP
+		status.Score = best.Score
+	}
 
 	if best == nil {
 		sc.resetRoute(routeKey)
 		log.Printf("[error] [%s/%s] no healthy candidate for %s", profile.ID, region, recordTargetLabel(rec))
-		if !allProbesFailed(results) {
+		if !allRouteProbesFailed(results, currentIP) {
 			sc.route(routeKey).failures = failureObservation{}
+			if checker.IsUsableCandidateIP(currentIP) && current == nil {
+				log.Printf("[check] [%s/%s] current IP %s has no probe result; cannot confirm outage", profile.ID, region, currentIP)
+			}
 			return status
 		}
 		confirmed := sc.route(routeKey).failures.confirm(results, cfg.FailureConfirmCycles)
@@ -1082,22 +1101,36 @@ func decideProfileRecord(cfg *config.Config, profile config.AirportProfile, regi
 		if current != nil && current.Err == nil {
 			status.Latency = resultLatencyMs(current)
 		}
-		log.Printf("[update] [%s/%s] keeping %s; candidate %s does not beat current enough (need %.0f%%, current %s, candidate %s)",
-			profile.ID, region, currentIP, best.IP, cfg.SwitchImprovement, describeResult(current), describeResult(best))
+		if current == nil {
+			log.Printf("[update] [%s/%s] keeping %s; current IP has no probe result, waiting for measurement before comparing candidate %s (%s)",
+				profile.ID, region, currentIP, best.IP, describeResult(best))
+		} else {
+			log.Printf("[update] [%s/%s] keeping %s; candidate %s does not beat current enough (need %.0f%%, current %s, candidate %s)",
+				profile.ID, region, currentIP, best.IP, cfg.SwitchImprovement, describeResult(current), describeResult(best))
+		}
 		return status
 	}
 
 	route := sc.route(routeKey)
-	if route.candidateIP != best.IP {
+	currentFailed := current != nil && current.Err != nil
+	if currentFailed {
+		log.Printf("[update] [%s/%s] current %s failed health check; switching to healthy candidate %s immediately", profile.ID, region, currentIP, best.IP)
+	} else if route.candidateIP != best.IP || (cfg.SwitchStableSec > 0 && route.candidateObservedAt.IsZero()) {
 		route.candidateIP = best.IP
 		route.candidateSince = now
+		route.candidateObservedAt = best.FinishedAt
 		status.Status = "stabilizing"
 		log.Printf("[update] [%s/%s] candidate %s is better than current %s; observing stability for %d cycles (~%ds)",
 			profile.ID, region, best.IP, currentIP, stableCycles(cfg), cfg.SwitchStableSec)
 		return status
 	}
 
-	if cfg.SwitchStableSec > 0 && now.Sub(route.candidateSince) < time.Duration(cfg.SwitchStableSec)*time.Second {
+	if !currentFailed && !candidateObservationReady(route.candidateObservedAt, best.FinishedAt, cfg.SwitchStableSec) {
+		status.Status = "stabilizing"
+		log.Printf("[update] [%s/%s] candidate %s waiting for a fresh measurement spanning the stability window", profile.ID, region, best.IP)
+		return status
+	}
+	if !currentFailed && cfg.SwitchStableSec > 0 && now.Sub(route.candidateSince) < time.Duration(cfg.SwitchStableSec)*time.Second {
 		remaining := time.Duration(cfg.SwitchStableSec)*time.Second - now.Sub(route.candidateSince)
 		status.Status = "stabilizing"
 		log.Printf("[update] [%s/%s] candidate %s still stabilizing for %s before switch", profile.ID, region, best.IP, remaining.Round(time.Second))
@@ -1151,6 +1184,7 @@ func runCheckCycle(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, ne
 				}
 			}
 			ws.UpdateStatus(st)
+			ws.UpdateTraceTargets(st, cfg)
 		}
 		log.Printf("next check in %s", cfg.CheckInterval)
 		return
@@ -1176,6 +1210,7 @@ func runCheckCycle(cfg *config.Config, cf *cloudflare.Client, ws *web.Server, ne
 			})
 		}
 		ws.UpdateStatus(st)
+		ws.UpdateTraceTargets(st, cfg)
 	}
 	log.Printf("next check in %s", cfg.CheckInterval)
 }
@@ -1363,15 +1398,16 @@ func decideLegacyRoute(cfg *config.Config, cf dnsRecordClient, sc *switchControl
 		log.Printf("[error] all %d IP(s) failed to respond", len(ips))
 		err := readErr
 		if err != nil {
+			sc.failures = failureObservation{}
 			log.Printf("[error] read current Cloudflare record failed: %v", err)
 			if sc.shouldSendAlert(time.Now()) {
 				sendFallbackAlert(cfg, "", ips, results, "all candidates failed and current record could not be read", false)
 			}
 			return &cycleOutcome{}
 		}
-		if !allProbesFailed(results) {
+		if !allRouteProbesFailed(results, currentIP) {
 			sc.failures = failureObservation{}
-			log.Printf("[check] no eligible candidate, but probes did not all fail; keeping current record")
+			log.Printf("[check] no eligible candidate, but complete failure of candidates and current IP is unconfirmed; keeping current record")
 			return &cycleOutcome{ActiveIP: currentIP, ActiveResult: findResultByIP(results, currentIP)}
 		}
 		confirmed := sc.failures.confirm(results, cfg.FailureConfirmCycles)
@@ -1452,13 +1488,13 @@ func decideLegacyRoute(cfg *config.Config, cf dnsRecordClient, sc *switchControl
 
 	if checker.IsUsableCandidateIP(currentIP) && !shouldReplaceCurrent(current, best, cfg) {
 		sc.reset()
-		log.Printf("[update] keeping %s; candidate %s does not beat current enough (need %.0f%%, current %s, candidate %s)",
-			currentIP,
-			best.IP,
-			cfg.SwitchImprovement,
-			describeResult(current),
-			describeResult(best),
-		)
+		if current == nil {
+			log.Printf("[update] keeping %s; current IP has no probe result, waiting for measurement before comparing candidate %s (%s)",
+				currentIP, best.IP, describeResult(best))
+		} else {
+			log.Printf("[update] keeping %s; candidate %s does not beat current enough (need %.0f%%, current %s, candidate %s)",
+				currentIP, best.IP, cfg.SwitchImprovement, describeResult(current), describeResult(best))
+		}
 		return &cycleOutcome{
 			Best:         best,
 			ActiveIP:     currentIP,
@@ -1467,9 +1503,13 @@ func decideLegacyRoute(cfg *config.Config, cf dnsRecordClient, sc *switchControl
 	}
 
 	now := time.Now()
-	if sc.candidateIP != best.IP {
+	currentFailed := current != nil && current.Err != nil
+	if currentFailed {
+		log.Printf("[update] current %s failed health check; switching to healthy candidate %s immediately", currentIP, best.IP)
+	} else if sc.candidateIP != best.IP || (cfg.SwitchStableSec > 0 && sc.candidateObservedAt.IsZero()) {
 		sc.candidateIP = best.IP
 		sc.candidateSince = now
+		sc.candidateObservedAt = best.FinishedAt
 		log.Printf("[update] candidate %s is better than current %s; observing stability for %d cycles (~%ds)",
 			best.IP, currentIP, stableCycles(cfg), cfg.SwitchStableSec)
 		return &cycleOutcome{
@@ -1479,7 +1519,11 @@ func decideLegacyRoute(cfg *config.Config, cf dnsRecordClient, sc *switchControl
 		}
 	}
 
-	if cfg.SwitchStableSec > 0 && now.Sub(sc.candidateSince) < time.Duration(cfg.SwitchStableSec)*time.Second {
+	if !currentFailed && !candidateObservationReady(sc.candidateObservedAt, best.FinishedAt, cfg.SwitchStableSec) {
+		log.Printf("[update] candidate %s waiting for a fresh measurement spanning the stability window", best.IP)
+		return &cycleOutcome{Best: best, ActiveIP: currentIP, ActiveResult: current}
+	}
+	if !currentFailed && cfg.SwitchStableSec > 0 && now.Sub(sc.candidateSince) < time.Duration(cfg.SwitchStableSec)*time.Second {
 		remaining := time.Duration(cfg.SwitchStableSec)*time.Second - now.Sub(sc.candidateSince)
 		log.Printf("[update] candidate %s still stabilizing for %s before switch", best.IP, remaining.Round(time.Second))
 		return &cycleOutcome{
@@ -1644,6 +1688,7 @@ func main() {
 			})
 		}
 		ws.UpdateStatus(st)
+		ws.UpdateTraceTargets(st, cfg)
 	}
 
 	timer := time.NewTimer(cfg.CheckInterval)
